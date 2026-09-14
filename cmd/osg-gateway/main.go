@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/lkmavi/osg-gateway/internal/gateway"
+	"github.com/zorneth/osg-gateway/internal/gateway"
 )
 
 func main() {
