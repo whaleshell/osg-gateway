@@ -40,7 +40,8 @@ type ProfileRecord struct {
 	YAML string `json:"yaml"`
 }
 
-// ProviderRecord is a named instance referencing a profile (env key names only).
+// ProviderRecord is a named instance referencing a profile.
+// EnvVars are key names only; values live in the encrypted secrets store.
 type ProviderRecord struct {
 	Name    string   `json:"name"`
 	Type    string   `json:"type"`

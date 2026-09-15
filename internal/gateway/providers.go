@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -8,14 +9,25 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/zorneth/osg-core/policy"
 	"github.com/zorneth/osg-core/provider"
+	"github.com/zorneth/osg-gateway/internal/logbuf"
 	"github.com/zorneth/osg-gateway/internal/store"
+	"github.com/zorneth/osg-runtime/secrets"
 	"gopkg.in/yaml.v3"
 )
 
-func mountProviderAPI(mux *http.ServeMux, st *store.Store, builtinDir string) {
+// providerWriteBody is the PUT payload: metadata + optional write-only credential values.
+type providerWriteBody struct {
+	Name        string            `json:"name"`
+	Type        string            `json:"type"`
+	EnvVars     []string          `json:"env_vars,omitempty"`
+	Credentials map[string]string `json:"credentials,omitempty"` // write-only; never returned
+}
+
+func mountProviderAPI(mux *http.ServeMux, st *store.Store, sec *secrets.LocalEncrypted, builtinDir string) {
 	mux.HandleFunc("/v1/profiles", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -77,7 +89,7 @@ func mountProviderAPI(mux *http.ServeMux, st *store.Store, builtinDir string) {
 			s := st.Snapshot()
 			list := make([]store.ProviderRecord, 0, len(s.Providers))
 			for _, p := range s.Providers {
-				list = append(list, p)
+				list = append(list, p) // EnvVars only — no secret values
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{"providers": list})
@@ -99,31 +111,47 @@ func mountProviderAPI(mux *http.ServeMux, st *store.Store, builtinDir string) {
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(p)
+			_ = json.NewEncoder(w).Encode(p) // never includes credential values
 		case http.MethodPut:
-			var rec store.ProviderRecord
-			if err := json.NewDecoder(r.Body).Decode(&rec); err != nil {
+			var body providerWriteBody
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			rec.Name = name
-			if strings.TrimSpace(rec.Type) == "" {
+			body.Name = name
+			if strings.TrimSpace(body.Type) == "" {
 				http.Error(w, "type (profile id) required", http.StatusBadRequest)
 				return
 			}
-			if _, _, err := resolveProfile(st, builtinDir, rec.Type); err != nil {
+			if _, _, err := resolveProfile(st, builtinDir, body.Type); err != nil {
 				http.Error(w, "unknown profile type: "+err.Error(), http.StatusBadRequest)
 				return
 			}
+			envVars := body.EnvVars
+			if len(envVars) == 0 && len(body.Credentials) > 0 {
+				for k := range body.Credentials {
+					envVars = append(envVars, k)
+				}
+			}
+			rec := store.ProviderRecord{Name: name, Type: body.Type, EnvVars: envVars}
 			if err := st.UpsertProvider(rec); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
+			}
+			if sec != nil && len(body.Credentials) > 0 {
+				if err := sec.PutProviderCredentials(r.Context(), name, body.Credentials); err != nil {
+					http.Error(w, "store credentials: "+err.Error(), http.StatusInternalServerError)
+					return
+				}
 			}
 			w.WriteHeader(http.StatusNoContent)
 		case http.MethodDelete:
 			if err := st.DeleteProvider(name); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
+			}
+			if sec != nil {
+				_ = sec.DeletePrefix(r.Context(), "provider/"+name+"/")
 			}
 			w.WriteHeader(http.StatusNoContent)
 		default:
@@ -132,7 +160,7 @@ func mountProviderAPI(mux *http.ServeMux, st *store.Store, builtinDir string) {
 	})
 }
 
-func handleSandboxSubpath(w http.ResponseWriter, r *http.Request, st *store.Store, builtinDir, name, rest string) {
+func handleSandboxSubpath(w http.ResponseWriter, r *http.Request, st *store.Store, sec *secrets.LocalEncrypted, logs *logbuf.Hub, builtinDir, name, rest string) {
 	parts := strings.Split(strings.Trim(rest, "/"), "/")
 	switch {
 	case len(parts) == 1 && parts[0] == "effective-policy" && r.Method == http.MethodGet:
@@ -148,6 +176,17 @@ func handleSandboxSubpath(w http.ResponseWriter, r *http.Request, st *store.Stor
 		}
 		w.Header().Set("Content-Type", "application/yaml")
 		_, _ = w.Write(b)
+	case len(parts) == 1 && parts[0] == "secrets" && r.Method == http.MethodGet:
+		// Sidecar resolve: return KEY=VAL map for all attached providers (never logged).
+		out, err := resolveSandboxSecrets(r.Context(), st, sec, builtinDir, name)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"secrets": out})
+	case len(parts) == 1 && parts[0] == "logs":
+		handleSandboxLogs(w, r, logs, name)
 	case len(parts) == 2 && parts[0] == "providers":
 		prov := parts[1]
 		switch r.Method {
@@ -173,6 +212,113 @@ func handleSandboxSubpath(w http.ResponseWriter, r *http.Request, st *store.Stor
 	default:
 		http.Error(w, "not found", http.StatusNotFound)
 	}
+}
+
+func resolveSandboxSecrets(ctx context.Context, st *store.Store, sec *secrets.LocalEncrypted, builtinDir, sandbox string) (map[string]string, error) {
+	sb, ok := st.GetSandbox(sandbox)
+	if !ok {
+		return nil, fmt.Errorf("sandbox %q not found", sandbox)
+	}
+	out := map[string]string{}
+	if sec == nil {
+		return out, nil
+	}
+	for _, pname := range sb.AttachedProviders {
+		inst, ok := st.GetProvider(pname)
+		if !ok {
+			continue
+		}
+		keys := inst.EnvVars
+		if len(keys) == 0 {
+			if prof, _, err := resolveProfile(st, builtinDir, inst.Type); err == nil {
+				keys = prof.EnvKeys()
+			}
+		}
+		creds, err := sec.GetProviderCredentials(ctx, pname, keys)
+		if err != nil {
+			return nil, err
+		}
+		for k, v := range creds {
+			out[k] = v
+		}
+	}
+	return out, nil
+}
+
+func handleSandboxLogs(w http.ResponseWriter, r *http.Request, logs *logbuf.Hub, name string) {
+	if logs == nil {
+		http.Error(w, "logs unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	q := r.URL.Query()
+	switch r.Method {
+	case http.MethodPost:
+		var body struct {
+			Lines []logbuf.Line `json:"lines"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		logs.Append(name, body.Lines)
+		w.WriteHeader(http.StatusNoContent)
+	case http.MethodGet:
+		follow := q.Get("follow") == "1" || q.Get("follow") == "true"
+		source := q.Get("source")
+		level := q.Get("level")
+		var since time.Time
+		if s := q.Get("since"); s != "" {
+			if dur, err := time.ParseDuration(s); err == nil {
+				since = time.Now().UTC().Add(-dur)
+			} else if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+				since = t
+			}
+		}
+		limit := 500
+		if follow {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Cache-Control", "no-cache")
+			w.Header().Set("Connection", "keep-alive")
+			flusher, ok := w.(http.Flusher)
+			if !ok {
+				http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+				return
+			}
+			sent := since
+			for {
+				lines := logs.Snapshot(name, sent, source, level, 0)
+				for _, ln := range lines {
+					if !sent.IsZero() && !ln.TS.After(sent) {
+						continue
+					}
+					fmt.Fprintf(w, "data: %s\n\n", formatLogLine(ln))
+					sent = ln.TS
+				}
+				flusher.Flush()
+				select {
+				case <-r.Context().Done():
+					return
+				case <-logs.Subscribe(name):
+				case <-time.After(15 * time.Second):
+					fmt.Fprintf(w, ": keepalive\n\n")
+					flusher.Flush()
+				}
+			}
+		}
+		lines := logs.Snapshot(name, since, source, level, limit)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"lines": lines})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func formatLogLine(ln logbuf.Line) string {
+	src := ln.Source
+	if src == "" {
+		src = "proxy"
+	}
+	return fmt.Sprintf("[%s] %s", src, ln.Text)
 }
 
 func listProfiles(st *store.Store, builtinDir string) []map[string]string {

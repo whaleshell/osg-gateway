@@ -17,8 +17,10 @@ import (
 
 	"github.com/zorneth/osg-core/defaults"
 	"github.com/zorneth/osg-core/policy"
+	"github.com/zorneth/osg-gateway/internal/logbuf"
 	"github.com/zorneth/osg-gateway/internal/relay"
 	"github.com/zorneth/osg-gateway/internal/store"
+	"github.com/zorneth/osg-runtime/secrets"
 )
 
 // Options configure the HTTP(S) control plane.
@@ -100,6 +102,11 @@ func Serve(ctx context.Context, opt Options) error {
 	if err != nil {
 		return err
 	}
+	sec, err := secrets.OpenLocal(opt.DataDir)
+	if err != nil {
+		return fmt.Errorf("gateway secrets: %w", err)
+	}
+	logs := logbuf.NewHub(4096)
 	hub := relay.NewHub()
 	mux := http.NewServeMux()
 	hub.Mount(mux)
@@ -152,7 +159,7 @@ func Serve(ctx context.Context, opt Options) error {
 			return
 		}
 		if hasSub {
-			handleSandboxSubpath(w, r, st, BuiltinProvidersDir(), name, sub)
+			handleSandboxSubpath(w, r, st, sec, logs, BuiltinProvidersDir(), name, sub)
 			return
 		}
 		switch r.Method {
@@ -186,7 +193,67 @@ func Serve(ctx context.Context, opt Options) error {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
 	})
-	mountProviderAPI(mux, st, BuiltinProvidersDir())
+	mountProviderAPI(mux, st, sec, BuiltinProvidersDir())
+	// Fleet logs: GET /v1/logs?follow=1 lists all sandboxes' ring buffers via query names=
+	mux.HandleFunc("/v1/logs", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		names := r.URL.Query()["name"]
+		if all := r.URL.Query().Get("all"); all == "1" || all == "true" {
+			snap := st.Snapshot()
+			names = names[:0]
+			for n := range snap.Sandboxes {
+				names = append(names, n)
+			}
+		}
+		if len(names) == 0 {
+			http.Error(w, "usage: /v1/logs?name=a&name=b or ?all=1", http.StatusBadRequest)
+			return
+		}
+		// Snapshot merge (non-follow) for simplicity; follow uses per-sandbox SSE.
+		follow := r.URL.Query().Get("follow") == "1" || r.URL.Query().Get("follow") == "true"
+		if follow && len(names) == 1 {
+			handleSandboxLogs(w, r, logs, names[0])
+			return
+		}
+		if follow {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Cache-Control", "no-cache")
+			flusher, ok := w.(http.Flusher)
+			if !ok {
+				http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+				return
+			}
+			last := map[string]time.Time{}
+			for {
+				for _, n := range names {
+					for _, ln := range logs.Snapshot(n, last[n], "", "", 0) {
+						if !last[n].IsZero() && !ln.TS.After(last[n]) {
+							continue
+						}
+						fmt.Fprintf(w, "data: [%s] %s\n\n", n, formatLogLine(ln))
+						last[n] = ln.TS
+					}
+				}
+				flusher.Flush()
+				select {
+				case <-r.Context().Done():
+					return
+				case <-time.After(500 * time.Millisecond):
+				}
+			}
+		}
+		var all []map[string]any
+		for _, n := range names {
+			for _, ln := range logs.Snapshot(n, time.Time{}, "", "", 200) {
+				all = append(all, map[string]any{"sandbox": n, "line": ln})
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"lines": all})
+	})
 	mux.HandleFunc("/v1/policy/global", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
