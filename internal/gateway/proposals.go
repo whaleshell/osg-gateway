@@ -1,0 +1,152 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 zorneth
+// SPDX-License-Identifier: MIT
+
+package gateway
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/zorneth/osg-core/policy"
+	"github.com/zorneth/osg-gateway/internal/store"
+	"gopkg.in/yaml.v3"
+)
+
+func handleSandboxProposals(w http.ResponseWriter, r *http.Request, st *store.Store, builtinDir, name, rest string) {
+	rest = strings.Trim(rest, "/")
+	switch {
+	case rest == "" && r.Method == http.MethodGet:
+		status := r.URL.Query().Get("status")
+		list := st.ListProposals(name, status)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"proposals": list})
+	case rest == "" && r.Method == http.MethodPost:
+		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		var p store.Proposal
+		if err := json.Unmarshal(body, &p); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		p.Sandbox = name
+		if p.CreatedAt.IsZero() {
+			p.CreatedAt = time.Now().UTC()
+		}
+		if p.Status == "" {
+			p.Status = "pending"
+		}
+		if err := st.PutProposal(p); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(p)
+	case rest != "" && !strings.Contains(rest, "/") && r.Method == http.MethodGet:
+		p, ok := st.GetProposal(rest)
+		if !ok || p.Sandbox != name {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(p)
+	case strings.HasSuffix(rest, "/approve") && r.Method == http.MethodPost:
+		id := strings.TrimSuffix(rest, "/approve")
+		id = strings.Trim(id, "/")
+		if err := approveProposal(st, builtinDir, name, id); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		p, _ := st.GetProposal(id)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(p)
+	case strings.HasSuffix(rest, "/reject") && r.Method == http.MethodPost:
+		id := strings.TrimSuffix(rest, "/reject")
+		id = strings.Trim(id, "/")
+		reason := ""
+		var body struct {
+			Reason string `json:"reason"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		reason = body.Reason
+		p, err := st.DecideProposal(id, "rejected", reason)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if p.Sandbox != name {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(p)
+	default:
+		http.Error(w, "not found", http.StatusNotFound)
+	}
+}
+
+func approveProposal(st *store.Store, builtinDir, sandbox, id string) error {
+	p, ok := st.GetProposal(id)
+	if !ok || p.Sandbox != sandbox {
+		return fmt.Errorf("proposal not found")
+	}
+	if p.Status == "approved" {
+		return nil
+	}
+	sb, ok := st.GetSandbox(sandbox)
+	if !ok {
+		return fmt.Errorf("sandbox not found")
+	}
+	base := sb.BasePolicyYAML
+	if strings.TrimSpace(base) == "" {
+		base = "version: 1\nnetwork_policies: {}\n"
+	}
+	merged, err := mergeProposalYAML(base, p.RuleName, p.RuleYAML)
+	if err != nil {
+		return err
+	}
+	if _, _, err := setSandboxBasePolicy(st, builtinDir, sandbox, []byte(merged)); err != nil {
+		return err
+	}
+	_, err = st.DecideProposal(id, "approved", "")
+	return err
+}
+
+func mergeProposalYAML(baseYAML, ruleName, ruleYAML string) (string, error) {
+	baseDoc, err := policy.Parse([]byte(baseYAML))
+	if err != nil {
+		return "", fmt.Errorf("base policy: %w", err)
+	}
+	var frag struct {
+		NetworkPolicies map[string]policy.NetworkPolicy `yaml:"network_policies"`
+	}
+	if err := yaml.Unmarshal([]byte(ruleYAML), &frag); err != nil {
+		return "", fmt.Errorf("proposal rule: %w", err)
+	}
+	if baseDoc.NetworkPolicies == nil {
+		baseDoc.NetworkPolicies = map[string]policy.NetworkPolicy{}
+	}
+	for k, v := range frag.NetworkPolicies {
+		name := k
+		if ruleName != "" {
+			name = ruleName
+			v.Name = ruleName
+		}
+		baseDoc.NetworkPolicies[name] = v
+	}
+	if err := baseDoc.Validate(); err != nil {
+		return "", err
+	}
+	b, err := yaml.Marshal(baseDoc)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}

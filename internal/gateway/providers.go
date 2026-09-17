@@ -269,6 +269,12 @@ func handleSandboxSubpath(w http.ResponseWriter, r *http.Request, st *store.Stor
 		_ = json.NewEncoder(w).Encode(map[string]any{"secrets": out})
 	case len(parts) == 1 && parts[0] == "logs":
 		handleSandboxLogs(w, r, logs, name)
+	case parts[0] == "proposals":
+		sub := ""
+		if len(parts) > 1 {
+			sub = strings.Join(parts[1:], "/")
+		}
+		handleSandboxProposals(w, r, st, builtinDir, name, sub)
 	case len(parts) == 2 && parts[0] == "providers":
 		prov := parts[1]
 		switch r.Method {

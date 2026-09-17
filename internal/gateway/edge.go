@@ -51,14 +51,14 @@ func withEdgeRouter(next http.Handler, st *store.Store) http.Handler {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
-		proxy := httputil.NewSingleHostReverseProxy(target)
-		origDirector := proxy.Director
-		proxy.Director = func(req *http.Request) {
-			origDirector(req)
-			req.Host = target.Host
-		}
-		proxy.ErrorHandler = func(rw http.ResponseWriter, _ *http.Request, err error) {
-			http.Error(rw, "edge proxy: "+err.Error(), http.StatusBadGateway)
+		proxy := &httputil.ReverseProxy{
+			Rewrite: func(pr *httputil.ProxyRequest) {
+				pr.SetURL(target)
+				pr.Out.Host = target.Host
+			},
+			ErrorHandler: func(rw http.ResponseWriter, _ *http.Request, err error) {
+				http.Error(rw, "edge proxy: "+err.Error(), http.StatusBadGateway)
+			},
 		}
 		proxy.ServeHTTP(w, r)
 	})

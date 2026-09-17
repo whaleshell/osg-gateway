@@ -27,6 +27,7 @@ type State struct {
 	Templates        map[string]TemplateRecord  `json:"templates,omitempty"`
 	Services         map[string]ServiceRecord   `json:"services,omitempty"`
 	Workspaces       map[string]WorkspaceRecord `json:"workspaces,omitempty"`
+	Proposals        map[string]Proposal        `json:"proposals,omitempty"`
 }
 
 // InferenceRoute is the gateway-scoped inference.local backend (OpenShell inference set).
@@ -134,6 +135,7 @@ func Open(dataDir, gatewayID string) (*Store, error) {
 			Templates:  map[string]TemplateRecord{},
 			Services:   map[string]ServiceRecord{},
 			Workspaces: map[string]WorkspaceRecord{},
+			Proposals:  map[string]Proposal{},
 		},
 	}
 	b, err := os.ReadFile(s.path)
@@ -161,6 +163,9 @@ func Open(dataDir, gatewayID string) (*Store, error) {
 		}
 		if s.state.Workspaces == nil {
 			s.state.Workspaces = map[string]WorkspaceRecord{}
+		}
+		if s.state.Proposals == nil {
+			s.state.Proposals = map[string]Proposal{}
 		}
 		if s.state.GatewayID == "" {
 			s.state.GatewayID = gatewayID
