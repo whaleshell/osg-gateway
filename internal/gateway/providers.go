@@ -12,19 +12,22 @@ import (
 	"time"
 
 	"github.com/zorneth/osg-core/policy"
-	"github.com/zorneth/osg-core/provider"
 	"github.com/zorneth/osg-gateway/internal/logbuf"
 	"github.com/zorneth/osg-gateway/internal/store"
+	"github.com/zorneth/osg-providers/provider"
 	"github.com/zorneth/osg-runtime/secrets"
 	"gopkg.in/yaml.v3"
 )
 
 // providerWriteBody is the PUT payload: metadata + optional write-only credential values.
 type providerWriteBody struct {
-	Name        string            `json:"name"`
-	Type        string            `json:"type"`
-	EnvVars     []string          `json:"env_vars,omitempty"`
-	Credentials map[string]string `json:"credentials,omitempty"` // write-only; never returned
+	Name                  string            `json:"name"`
+	Type                  string            `json:"type"`
+	EnvVars               []string          `json:"env_vars,omitempty"`
+	Credentials           map[string]string `json:"credentials,omitempty"` // write-only; never returned
+	CredentialExpiresAtMS map[string]int64  `json:"credential_expires_at_ms,omitempty"`
+	RuntimeCredentials    bool              `json:"runtime_credentials,omitempty"`
+	Config                map[string]string `json:"config,omitempty"`
 }
 
 func mountProviderAPI(mux *http.ServeMux, st *store.Store, sec *secrets.LocalEncrypted, builtinDir string) {
@@ -98,9 +101,21 @@ func mountProviderAPI(mux *http.ServeMux, st *store.Store, sec *secrets.LocalEnc
 		}
 	})
 	mux.HandleFunc("/v1/providers/", func(w http.ResponseWriter, r *http.Request) {
-		name := strings.Trim(strings.TrimPrefix(r.URL.Path, "/v1/providers/"), "/")
-		if name == "" || strings.Contains(name, "/") {
+		rest := strings.Trim(strings.TrimPrefix(r.URL.Path, "/v1/providers/"), "/")
+		if rest == "" {
 			http.Error(w, "bad name", http.StatusBadRequest)
+			return
+		}
+		name, sub, hasSub := strings.Cut(rest, "/")
+		if name == "" {
+			http.Error(w, "bad name", http.StatusBadRequest)
+			return
+		}
+		if hasSub {
+			if handleProviderRefreshPath(w, r, st, sec, name, sub) {
+				return
+			}
+			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
 		switch r.Method {
@@ -133,7 +148,14 @@ func mountProviderAPI(mux *http.ServeMux, st *store.Store, sec *secrets.LocalEnc
 					envVars = append(envVars, k)
 				}
 			}
-			rec := store.ProviderRecord{Name: name, Type: body.Type, EnvVars: envVars}
+			rec := store.ProviderRecord{
+				Name:                  name,
+				Type:                  body.Type,
+				EnvVars:               envVars,
+				CredentialExpiresAtMS: body.CredentialExpiresAtMS,
+				RuntimeCredentials:    body.RuntimeCredentials,
+				Config:                body.Config,
+			}
 			if err := st.UpsertProvider(rec); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
@@ -176,6 +198,66 @@ func handleSandboxSubpath(w http.ResponseWriter, r *http.Request, st *store.Stor
 		}
 		w.Header().Set("Content-Type", "application/yaml")
 		_, _ = w.Write(b)
+	case len(parts) == 1 && parts[0] == "policy":
+		handleSandboxPolicy(w, r, st, builtinDir, name)
+	case len(parts) == 1 && parts[0] == "policy-revisions" && r.Method == http.MethodGet:
+		if revStr := strings.TrimSpace(r.URL.Query().Get("rev")); revStr != "" {
+			var rev int
+			if _, err := fmt.Sscanf(revStr, "%d", &rev); err != nil || rev <= 0 {
+				http.Error(w, "invalid rev", http.StatusBadRequest)
+				return
+			}
+			rec, err := st.GetPolicyRevision(name, rev)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusNotFound)
+				return
+			}
+			w.Header().Set("Content-Type", "application/yaml")
+			_, _ = w.Write([]byte(rec.YAML))
+			return
+		}
+		revs, err := st.ListPolicyRevisions(name)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		type row struct {
+			Rev       int       `json:"rev"`
+			UpdatedAt time.Time `json:"updated_at"`
+			Bytes     int       `json:"bytes"`
+			Status    string    `json:"status"`
+		}
+		out := make([]row, 0, len(revs))
+		for _, r := range revs {
+			out = append(out, row{Rev: r.Rev, UpdatedAt: r.UpdatedAt, Bytes: r.Bytes, Status: r.Status})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"revisions": out})
+	case len(parts) == 1 && parts[0] == "providers" && r.Method == http.MethodGet:
+		sb, ok := st.GetSandbox(name)
+		if !ok {
+			http.Error(w, "sandbox not found", http.StatusNotFound)
+			return
+		}
+		type att struct {
+			Name    string   `json:"name"`
+			Type    string   `json:"type,omitempty"`
+			EnvVars []string `json:"env_vars,omitempty"`
+		}
+		list := make([]att, 0, len(sb.AttachedProviders))
+		for _, pn := range sb.AttachedProviders {
+			a := att{Name: pn}
+			if rec, ok := st.GetProvider(pn); ok {
+				a.Type = rec.Type
+				a.EnvVars = append([]string{}, rec.EnvVars...)
+			}
+			list = append(list, a)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"providers": list})
+	case len(parts) == 1 && parts[0] == "base-policy" && r.Method == http.MethodGet:
+		// Alias for OpenShell-style policy get --base.
+		handleSandboxPolicy(w, r, st, builtinDir, name)
 	case len(parts) == 1 && parts[0] == "secrets" && r.Method == http.MethodGet:
 		// Sidecar resolve: return KEY=VAL map for all attached providers (never logged).
 		out, err := resolveSandboxSecrets(r.Context(), st, sec, builtinDir, name)
@@ -214,6 +296,109 @@ func handleSandboxSubpath(w http.ResponseWriter, r *http.Request, st *store.Stor
 	}
 }
 
+// handleSandboxPolicy implements OpenShell-style base/full policy get and set.
+//
+//	GET  /v1/sandboxes/{name}/policy?view=base|full   (default full)
+//	PUT  /v1/sandboxes/{name}/policy                  body = base YAML
+//
+// PUT stores the editable base layer, then validates EffectivePolicy(base, providers, global).
+// On compose/validate failure the previous base is kept (fail-closed). Response body
+// is the effective YAML so clients can write it to the sandbox policy bind.
+func handleSandboxPolicy(w http.ResponseWriter, r *http.Request, st *store.Store, builtinDir, name string) {
+	switch r.Method {
+	case http.MethodGet:
+		view := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("view")))
+		if view == "" {
+			// /base-policy path → base; /policy default → full
+			if strings.HasSuffix(r.URL.Path, "/base-policy") {
+				view = "base"
+			} else {
+				view = "full"
+			}
+		}
+		sb, ok := st.GetSandbox(name)
+		if !ok {
+			http.Error(w, "sandbox not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/yaml")
+		switch view {
+		case "base":
+			_, _ = w.Write([]byte(sb.BasePolicyYAML))
+		case "full", "effective":
+			doc, err := effectivePolicy(st, builtinDir, name)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			b, err := yaml.Marshal(doc)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			_, _ = w.Write(b)
+		default:
+			http.Error(w, `view must be "base" or "full"`, http.StatusBadRequest)
+		}
+	case http.MethodPut, http.MethodPost:
+		body, err := io.ReadAll(io.LimitReader(r.Body, 4<<20))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		eff, stripped, err := setSandboxBasePolicy(st, builtinDir, name, body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/yaml")
+		if stripped > 0 {
+			w.Header().Set("X-Osg-Stripped-Provider-Rules", fmt.Sprintf("%d", stripped))
+		}
+		_, _ = w.Write(eff)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// setSandboxBasePolicy validates and stores base YAML, then returns effective YAML.
+func setSandboxBasePolicy(st *store.Store, builtinDir, name string, body []byte) (effective []byte, stripped int, err error) {
+	if _, ok := st.GetSandbox(name); !ok {
+		return nil, 0, fmt.Errorf("sandbox %q not found", name)
+	}
+	doc, err := policy.Parse(body)
+	if err != nil {
+		return nil, 0, fmt.Errorf("base policy: %w", err)
+	}
+	doc, stripped = provider.OmitProviderComposed(doc)
+	if err := doc.Validate(); err != nil {
+		return nil, 0, fmt.Errorf("base policy: %w", err)
+	}
+	storeYAML := body
+	if stripped > 0 {
+		storeYAML, err = yaml.Marshal(doc)
+		if err != nil {
+			return nil, 0, err
+		}
+	}
+	prev, _ := st.GetSandbox(name)
+	prevBase := prev.BasePolicyYAML
+	if err := st.SetBasePolicy(name, string(storeYAML)); err != nil {
+		return nil, 0, err
+	}
+	effDoc, err := effectivePolicy(st, builtinDir, name)
+	if err != nil {
+		_ = st.SetBasePolicy(name, prevBase) // roll back
+		return nil, 0, fmt.Errorf("effective policy: %w", err)
+	}
+	b, err := yaml.Marshal(effDoc)
+	if err != nil {
+		_ = st.SetBasePolicy(name, prevBase)
+		return nil, 0, err
+	}
+	return b, stripped, nil
+}
+
 func resolveSandboxSecrets(ctx context.Context, st *store.Store, sec *secrets.LocalEncrypted, builtinDir, sandbox string) (map[string]string, error) {
 	sb, ok := st.GetSandbox(sandbox)
 	if !ok {
@@ -242,7 +427,24 @@ func resolveSandboxSecrets(ctx context.Context, st *store.Store, sec *secrets.Lo
 			out[k] = v
 		}
 	}
+	aliasGitHubTokenKeys(out)
 	return out, nil
+}
+
+// aliasGitHubTokenKeys mirrors GITHUB_TOKEN ↔ GH_TOKEN so guest/policy can use either
+// name while the provider instance only stores one key.
+func aliasGitHubTokenKeys(out map[string]string) {
+	if out == nil {
+		return
+	}
+	gh, hasGH := out["GITHUB_TOKEN"]
+	tok, hasTok := out["GH_TOKEN"]
+	if hasGH && strings.TrimSpace(gh) != "" && !hasTok {
+		out["GH_TOKEN"] = gh
+	}
+	if hasTok && strings.TrimSpace(tok) != "" && !hasGH {
+		out["GITHUB_TOKEN"] = tok
+	}
 }
 
 func handleSandboxLogs(w http.ResponseWriter, r *http.Request, logs *logbuf.Hub, name string) {
@@ -374,7 +576,7 @@ func effectivePolicy(st *store.Store, builtinDir, sandbox string) (policy.Docume
 		}
 		base = doc
 	} else {
-		base = policy.Document{Version: 1, Network: &policy.Network{Default: "deny"}}
+		base = policy.Document{Version: 1}
 	}
 	globalYAML := st.GetGlobalPolicy()
 	suppress := false
@@ -383,7 +585,7 @@ func effectivePolicy(st *store.Store, builtinDir, sandbox string) (policy.Docume
 		if err != nil {
 			return policy.Document{}, err
 		}
-		if gdoc.Network != nil && len(gdoc.Network.Allow) > 0 {
+		if len(gdoc.NetworkAllows()) > 0 {
 			suppress = true
 		}
 		base, err = policy.MergeGlobal(base, gdoc)
@@ -407,7 +609,7 @@ func effectivePolicy(st *store.Store, builtinDir, sandbox string) (policy.Docume
 			EnvVars:      inst.EnvVars,
 		})
 	}
-	out := provider.Compose(base, layers, suppress)
+	out := provider.EffectivePolicy(base, layers, suppress)
 	if err := out.Validate(); err != nil {
 		return policy.Document{}, err
 	}

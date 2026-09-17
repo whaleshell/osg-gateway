@@ -29,6 +29,7 @@ type Options struct {
 	DataDir string // durable state
 	TLSCert string // optional
 	TLSKey  string // optional
+	OIDC    OIDCOptions
 }
 
 // Run starts the gateway until context cancel / signal via ListenAndServe.
@@ -63,13 +64,36 @@ func Run(args []string) error {
 				return fmt.Errorf("--tls-key needs a value")
 			}
 			opt.TLSKey = args[i]
+		case "--oidc-issuer":
+			i++
+			if i >= len(args) {
+				return fmt.Errorf("--oidc-issuer needs a value")
+			}
+			opt.OIDC.Issuer = args[i]
+		case "--oidc-audience":
+			i++
+			if i >= len(args) {
+				return fmt.Errorf("--oidc-audience needs a value")
+			}
+			opt.OIDC.Audience = args[i]
+		case "--oidc-client-id":
+			i++
+			if i >= len(args) {
+				return fmt.Errorf("--oidc-client-id needs a value")
+			}
+			opt.OIDC.ClientID = args[i]
+		case "--oidc-allow-insecure-http":
+			opt.OIDC.AllowInsecureHTTP = true
 		case "-h", "--help":
 			fmt.Fprintf(os.Stderr, "usage: osg-gateway [--listen ADDR] [--data-dir DIR] [--tls-cert F] [--tls-key F]\n")
+			fmt.Fprintf(os.Stderr, "                 [--oidc-issuer URL] [--oidc-client-id ID] [--oidc-audience AUD]\n")
+			fmt.Fprintf(os.Stderr, "                 [--oidc-allow-insecure-http]\n")
 			return nil
 		default:
 			return fmt.Errorf("unknown flag %q", args[i])
 		}
 	}
+	oidcFromEnvAndFlags(&opt)
 	return Serve(context.Background(), opt)
 }
 
@@ -106,6 +130,11 @@ func Serve(ctx context.Context, opt Options) error {
 	if err != nil {
 		return fmt.Errorf("gateway secrets: %w", err)
 	}
+	oidcFromEnvAndFlags(&opt)
+	oidcValidator, err := newOIDCValidator(opt.OIDC)
+	if err != nil {
+		return fmt.Errorf("gateway oidc: %w", err)
+	}
 	logs := logbuf.NewHub(4096)
 	hub := relay.NewHub()
 	mux := http.NewServeMux()
@@ -122,14 +151,27 @@ func Serve(ctx context.Context, opt Options) error {
 	})
 	mux.HandleFunc("/v1/info", func(w http.ResponseWriter, _ *http.Request) {
 		s := st.Snapshot()
+		kek := secrets.Inspect(opt.DataDir, os.Getenv)
+		authMode := "local-dev"
+		if oidcValidator != nil {
+			authMode = "oidc"
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"gateway_id":        s.GatewayID,
 			"sandbox_count":     len(s.Sandboxes),
 			"updated_at":        s.UpdatedAt,
 			"data_dir":          opt.DataDir,
+			"auth_mode":         authMode,
+			"oidc_issuer":       opt.OIDC.Issuer,
 			"host_osg_internal": "host.osg.internal → host-gateway (Docker)",
 			"relay":             "long-poll /v1/relay/{name}/poll|exec|result",
+			"secrets_kek": map[string]any{
+				"source":  string(kek.Source),
+				"pinned":  kek.Pinned,
+				"env":     secrets.EnvKEK,
+				"warning": kek.Warning(),
+			},
 		})
 	})
 	mux.HandleFunc("/v1/sandboxes", func(w http.ResponseWriter, r *http.Request) {
@@ -194,6 +236,11 @@ func Serve(ctx context.Context, opt Options) error {
 		}
 	})
 	mountProviderAPI(mux, st, sec, BuiltinProvidersDir())
+	mountParityAPI(mux, st, oidcValidator)
+	mountOIDCAuthAPI(mux, opt.OIDC, oidcValidator, st.AuthToken)
+	if oidcValidator != nil {
+		fmt.Fprintf(os.Stderr, "osg-gateway: OIDC auth enabled issuer=%s\n", opt.OIDC.Issuer)
+	}
 	// Fleet logs: GET /v1/logs?follow=1 lists all sandboxes' ring buffers via query names=
 	mux.HandleFunc("/v1/logs", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -288,7 +335,7 @@ func Serve(ctx context.Context, opt Options) error {
 
 	srv := &http.Server{
 		Addr:              opt.Listen,
-		Handler:           mux,
+		Handler:           withEdgeRouter(mux, st),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	ln, err := net.Listen("tcp", opt.Listen)

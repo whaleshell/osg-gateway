@@ -1,0 +1,446 @@
+package gateway
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/zorneth/osg-gateway/internal/store"
+	"github.com/zorneth/osg-runtime/idp"
+	"github.com/zorneth/osg-runtime/secrets"
+)
+
+// mountParityAPI registers inference, settings, templates, whoami, and local auth.
+func mountParityAPI(mux *http.ServeMux, st *store.Store, oidcValidator *idp.OIDC) {
+	mux.HandleFunc("/v1/inference", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			route, ok := st.GetInferenceRoute()
+			if !ok {
+				http.Error(w, "inference route not set", http.StatusNotFound)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(route)
+		case http.MethodPut:
+			var body struct {
+				Provider   string `json:"provider"`
+				Model      string `json:"model"`
+				TimeoutSec int    `json:"timeout_sec"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if strings.TrimSpace(body.Provider) == "" || strings.TrimSpace(body.Model) == "" {
+				http.Error(w, "provider and model required", http.StatusBadRequest)
+				return
+			}
+			if _, ok := st.GetProvider(body.Provider); !ok {
+				http.Error(w, fmt.Sprintf("provider %q not found", body.Provider), http.StatusBadRequest)
+				return
+			}
+			route := store.InferenceRoute{Provider: body.Provider, Model: body.Model, TimeoutSec: body.TimeoutSec}
+			if err := st.SetInferenceRoute(route); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			out, _ := st.GetInferenceRoute()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(out)
+		case http.MethodDelete:
+			if err := st.ClearInferenceRoute(); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	mux.HandleFunc("/v1/settings", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"settings": st.AllSettings()})
+	})
+	mux.HandleFunc("/v1/settings/", func(w http.ResponseWriter, r *http.Request) {
+		key := strings.Trim(strings.TrimPrefix(r.URL.Path, "/v1/settings/"), "/")
+		if key == "" || strings.Contains(key, "/") {
+			http.Error(w, "bad key", http.StatusBadRequest)
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			v, ok := st.GetSetting(key)
+			if !ok {
+				http.Error(w, "not found", http.StatusNotFound)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{"key": key, "value": v})
+		case http.MethodPut:
+			var body struct {
+				Value string `json:"value"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if err := st.SetSetting(key, body.Value); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		case http.MethodDelete:
+			if err := st.DeleteSetting(key); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	mux.HandleFunc("/v1/templates", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"templates": st.ListTemplates()})
+	})
+	mux.HandleFunc("/v1/templates/", func(w http.ResponseWriter, r *http.Request) {
+		name := strings.Trim(strings.TrimPrefix(r.URL.Path, "/v1/templates/"), "/")
+		if name == "" || strings.Contains(name, "/") {
+			http.Error(w, "bad name", http.StatusBadRequest)
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			t, ok := st.GetTemplate(name)
+			if !ok {
+				http.Error(w, "not found", http.StatusNotFound)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(t)
+		case http.MethodPut:
+			var t store.TemplateRecord
+			if err := json.NewDecoder(r.Body).Decode(&t); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			t.Name = name
+			if err := st.UpsertTemplate(t); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		case http.MethodDelete:
+			if err := st.DeleteTemplate(name); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	mux.HandleFunc("/v1/whoami", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		subject, auth, idpName := identityFromRequest(r, oidcValidator, st.AuthToken())
+		roles := []string{"user"}
+		if auth == "authenticated" {
+			roles = []string{"platform_admin"}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"subject":    subject,
+			"auth":       auth,
+			"roles":      roles,
+			"idp":        idpName,
+			"gateway_id": st.Snapshot().GatewayID,
+		})
+	})
+
+	mux.HandleFunc("/v1/auth/login", func(w http.ResponseWriter, r *http.Request) {
+		token, err := st.EnsureAuthToken()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		redirect := r.URL.Query().Get("redirect_uri")
+		if redirect != "" {
+			sep := "?"
+			if strings.Contains(redirect, "?") {
+				sep = "&"
+			}
+			http.Redirect(w, r, redirect+sep+"token="+token, http.StatusFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token":      token,
+			"expires_at": time.Now().Add(24 * time.Hour).UTC(),
+			"mode":       "local-dev",
+		})
+	})
+
+	mountServicesAPI(mux, st)
+	mountWorkspacesAPI(mux, st)
+}
+
+func mountServicesAPI(mux *http.ServeMux, st *store.Store) {
+	mux.HandleFunc("/v1/services", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"services": st.ListServices()})
+	})
+	mux.HandleFunc("/v1/services/", func(w http.ResponseWriter, r *http.Request) {
+		name := strings.Trim(strings.TrimPrefix(r.URL.Path, "/v1/services/"), "/")
+		if name == "" || strings.Contains(name, "/") {
+			http.Error(w, "bad name", http.StatusBadRequest)
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			rec, ok := st.GetService(name)
+			if !ok {
+				http.Error(w, "not found", http.StatusNotFound)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(rec)
+		case http.MethodPut:
+			var rec store.ServiceRecord
+			if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&rec); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			rec.Name = name
+			if err := st.UpsertService(rec); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(rec)
+		case http.MethodDelete:
+			if err := st.DeleteService(name); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+}
+
+func mountWorkspacesAPI(mux *http.ServeMux, st *store.Store) {
+	mux.HandleFunc("/v1/workspaces", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"workspaces": st.ListWorkspaces()})
+		case http.MethodPost:
+			var body struct {
+				Name string `json:"name"`
+			}
+			if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			body.Name = strings.TrimSpace(body.Name)
+			if body.Name == "" {
+				http.Error(w, "name required", http.StatusBadRequest)
+				return
+			}
+			ws := store.WorkspaceRecord{Name: body.Name}
+			if err := st.UpsertWorkspace(ws); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			out, _ := st.GetWorkspace(body.Name)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(out)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+	mux.HandleFunc("/v1/workspaces/", func(w http.ResponseWriter, r *http.Request) {
+		path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/v1/workspaces/"), "/")
+		parts := strings.Split(path, "/")
+		if len(parts) == 0 || parts[0] == "" {
+			http.Error(w, "bad path", http.StatusBadRequest)
+			return
+		}
+		name := parts[0]
+		if len(parts) == 1 {
+			switch r.Method {
+			case http.MethodGet:
+				ws, ok := st.GetWorkspace(name)
+				if !ok {
+					http.Error(w, "not found", http.StatusNotFound)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(ws)
+			case http.MethodDelete:
+				if err := st.DeleteWorkspace(name); err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			}
+			return
+		}
+		if len(parts) >= 2 && parts[1] == "members" {
+			switch {
+			case len(parts) == 2 && r.Method == http.MethodGet:
+				ws, ok := st.GetWorkspace(name)
+				if !ok {
+					http.Error(w, "not found", http.StatusNotFound)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{"members": ws.Members})
+			case len(parts) == 2 && r.Method == http.MethodPut:
+				var body struct {
+					Subject string `json:"subject"`
+					Role    string `json:"role"`
+				}
+				if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				if strings.TrimSpace(body.Subject) == "" {
+					http.Error(w, "subject required", http.StatusBadRequest)
+					return
+				}
+				if err := st.WorkspaceMemberUpsert(name, body.Subject, body.Role); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				w.WriteHeader(http.StatusNoContent)
+			case len(parts) == 3 && r.Method == http.MethodDelete:
+				if err := st.WorkspaceMemberRemove(name, parts[2]); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			}
+			return
+		}
+		http.Error(w, "not found", http.StatusNotFound)
+	})
+}
+
+func bearerToken(r *http.Request) string {
+	h := r.Header.Get("Authorization")
+	if strings.HasPrefix(strings.ToLower(h), "bearer ") {
+		return strings.TrimSpace(h[7:])
+	}
+	return ""
+}
+
+func handleProviderRefreshPath(w http.ResponseWriter, r *http.Request, st *store.Store, sec *secrets.LocalEncrypted, name, sub string) bool {
+	if !strings.HasPrefix(sub, "refresh") {
+		return false
+	}
+	rec, ok := st.GetProvider(name)
+	if !ok {
+		http.Error(w, "provider not found", http.StatusNotFound)
+		return true
+	}
+	parts := strings.Split(sub, "/")
+	switch {
+	case len(parts) == 1 && parts[0] == "refresh" && r.Method == http.MethodGet:
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"refresh": rec.Refresh})
+	case len(parts) == 2 && parts[0] == "refresh" && r.Method == http.MethodPut:
+		var body store.ProviderRefreshConfig
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return true
+		}
+		body.CredentialKey = parts[1]
+		if body.Strategy == "" {
+			body.Strategy = "env"
+		}
+		if rec.Refresh == nil {
+			rec.Refresh = map[string]store.ProviderRefreshConfig{}
+		}
+		rec.Refresh[body.CredentialKey] = body
+		if body.ExpiresAtMS > 0 {
+			if rec.CredentialExpiresAtMS == nil {
+				rec.CredentialExpiresAtMS = map[string]int64{}
+			}
+			rec.CredentialExpiresAtMS[body.CredentialKey] = body.ExpiresAtMS
+		}
+		if err := st.UpsertProvider(rec); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return true
+		}
+		w.WriteHeader(http.StatusNoContent)
+	case len(parts) == 2 && parts[0] == "refresh" && r.Method == http.MethodDelete:
+		if rec.Refresh != nil {
+			delete(rec.Refresh, parts[1])
+		}
+		if err := st.UpsertProvider(rec); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return true
+		}
+		w.WriteHeader(http.StatusNoContent)
+	case len(parts) == 3 && parts[0] == "refresh" && parts[2] == "rotate" && r.Method == http.MethodPost:
+		key := parts[1]
+		cfg, ok := rec.Refresh[key]
+		if !ok {
+			cfg = store.ProviderRefreshConfig{CredentialKey: key, Strategy: "env"}
+		}
+		v, expMS, err := rotateCredential(cfg, key)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return true
+		}
+		if err := sec.PutProviderCredentials(r.Context(), name, map[string]string{key: v}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return true
+		}
+		if expMS > 0 {
+			if rec.CredentialExpiresAtMS == nil {
+				rec.CredentialExpiresAtMS = map[string]int64{}
+			}
+			rec.CredentialExpiresAtMS[key] = expMS
+			cfg.ExpiresAtMS = expMS
+			if rec.Refresh == nil {
+				rec.Refresh = map[string]store.ProviderRefreshConfig{}
+			}
+			rec.Refresh[key] = cfg
+			_ = st.UpsertProvider(rec)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		http.Error(w, "not found", http.StatusNotFound)
+	}
+	return true
+}
