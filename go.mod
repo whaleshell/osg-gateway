@@ -3,9 +3,9 @@ module github.com/zorneth/osg-gateway
 go 1.27.0
 
 require (
-	github.com/zorneth/osg-core v0.0.0
-	github.com/zorneth/osg-providers v0.0.0
-	github.com/zorneth/osg-runtime v0.0.0
+	github.com/zorneth/osg-core v0.1.0-alpha.1
+	github.com/zorneth/osg-providers v0.1.0-alpha.1
+	github.com/zorneth/osg-runtime v0.1.0-alpha.1
 	gopkg.in/yaml.v3 v3.0.1
 )
 

@@ -87,6 +87,7 @@ Durable state: `$XDG_STATE_HOME/osg/gateway/state.json`.
 
 | Resource | Link |
 |----------|------|
+| Roadmap | [ROADMAP.md](./ROADMAP.md) |
 | Organization | [https://github.com/zorneth](https://github.com/zorneth) |
 | Organization overview | [github.com/zorneth](https://github.com/zorneth) |
 | pkg.go.dev | [`github.com/zorneth/osg-gateway`](https://pkg.go.dev/github.com/zorneth/osg-gateway) |
