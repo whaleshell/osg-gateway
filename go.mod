@@ -9,7 +9,17 @@ require (
 	gopkg.in/yaml.v3 v3.0.1
 )
 
+require (
+	github.com/cespare/xxhash/v2 v2.3.0 // indirect
+	github.com/glaciforge/slogx v0.0.0 // indirect
+	github.com/lkmavi/saferefl v0.4.0 // indirect
+	go.opentelemetry.io/otel v1.46.0 // indirect
+	go.opentelemetry.io/otel/sdk v1.46.0 // indirect
+	go.opentelemetry.io/otel/trace v1.46.0 // indirect
+)
+
 replace (
+	github.com/glaciforge/slogx => ../slogx
 	github.com/zorneth/osg-core => ../osg-core
 	github.com/zorneth/osg-providers => ../osg-providers
 	github.com/zorneth/osg-runtime => ../osg-runtime

@@ -20,6 +20,7 @@ import (
 	"github.com/zorneth/osg-gateway/internal/logbuf"
 	"github.com/zorneth/osg-gateway/internal/relay"
 	"github.com/zorneth/osg-gateway/internal/store"
+	"github.com/zorneth/osg-runtime/logging"
 	"github.com/zorneth/osg-runtime/secrets"
 )
 
@@ -34,6 +35,11 @@ type Options struct {
 
 // Run starts the gateway until context cancel / signal via ListenAndServe.
 func Run(args []string) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	log := logging.Setup(ctx, logging.Options{Service: "osg-gateway"})
+	ctx = logging.ToContext(ctx, log)
+
 	opt := Options{
 		Listen:  defaults.GatewayListen,
 		DataDir: defaultDataDir(),
@@ -94,7 +100,7 @@ func Run(args []string) error {
 		}
 	}
 	oidcFromEnvAndFlags(&opt)
-	return Serve(context.Background(), opt)
+	return Serve(ctx, opt)
 }
 
 func defaultDataDir() string {
@@ -116,6 +122,10 @@ func newGatewayID() string {
 
 // Serve runs the HTTP API.
 func Serve(ctx context.Context, opt Options) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	log := logging.FromContext(ctx)
 	if opt.Listen == "" {
 		opt.Listen = defaults.GatewayListen
 	}
@@ -139,6 +149,8 @@ func Serve(ctx context.Context, opt Options) error {
 	hub := relay.NewHub()
 	mux := http.NewServeMux()
 	hub.Mount(mux)
+	mux.Handle("/debug/loglevel", log.LevelHTTPHandler())
+	mux.Handle("/debug/loglevel/", log.LevelHTTPHandler())
 
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		s := st.Snapshot()
@@ -239,7 +251,7 @@ func Serve(ctx context.Context, opt Options) error {
 	mountParityAPI(mux, st, oidcValidator)
 	mountOIDCAuthAPI(mux, opt.OIDC, oidcValidator, st.AuthToken)
 	if oidcValidator != nil {
-		fmt.Fprintf(os.Stderr, "osg-gateway: OIDC auth enabled issuer=%s\n", opt.OIDC.Issuer)
+		log.Info("oidc auth enabled", "issuer", opt.OIDC.Issuer)
 	}
 	// Fleet logs: GET /v1/logs?follow=1 lists all sandboxes' ring buffers via query names=
 	mux.HandleFunc("/v1/logs", func(w http.ResponseWriter, r *http.Request) {
@@ -342,10 +354,13 @@ func Serve(ctx context.Context, opt Options) error {
 	if err != nil {
 		return fmt.Errorf("gateway listen %s: %w", opt.Listen, err)
 	}
-	fmt.Fprintf(os.Stderr, "osg-gateway: listening on http://%s (data=%s id=%s)\n",
-		opt.Listen, opt.DataDir, st.Snapshot().GatewayID)
+	log.Info("listening",
+		"addr", opt.Listen,
+		"data_dir", opt.DataDir,
+		"gateway_id", st.Snapshot().GatewayID,
+	)
 	if opt.TLSCert != "" && opt.TLSKey != "" {
-		fmt.Fprintf(os.Stderr, "osg-gateway: TLS enabled\n")
+		log.Info("tls enabled")
 		errCh := make(chan error, 1)
 		go func() { errCh <- srv.ServeTLS(ln, opt.TLSCert, opt.TLSKey) }()
 		select {
