@@ -62,6 +62,12 @@ jobs:
         with:
           repository: zorneth/osg-sdk
           path: osg-sdk
+
+      - name: Checkout slogx
+        uses: actions/checkout@v4
+        with:
+          repository: zorneth/slogx
+          path: slogx
       - uses: docker/setup-buildx-action@v3
       - name: Login GHCR
         if: github.event_name != 'pull_request'

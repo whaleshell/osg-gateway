@@ -14,6 +14,7 @@ COPY osg-runtime ./osg-runtime
 COPY osg-proxy ./osg-proxy
 COPY osg-driver ./osg-driver
 COPY osg-sdk ./osg-sdk
+COPY slogx ./slogx
 COPY osg-gateway ./osg-gateway
 WORKDIR /src/osg-gateway
 RUN CGO_ENABLED=0 go build -o /out/osg-gateway ./cmd/osg-gateway
