@@ -11,7 +11,7 @@ require (
 
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/glaciforge/slogx v0.0.0 // indirect
+	github.com/zorneth/slogx v0.0.0 // indirect
 	github.com/lkmavi/saferefl v0.4.0 // indirect
 	go.opentelemetry.io/otel v1.46.0 // indirect
 	go.opentelemetry.io/otel/sdk v1.46.0 // indirect
@@ -19,7 +19,7 @@ require (
 )
 
 replace (
-	github.com/glaciforge/slogx => ../slogx
+	github.com/zorneth/slogx => ../slogx
 	github.com/zorneth/osg-core => ../osg-core
 	github.com/zorneth/osg-providers => ../osg-providers
 	github.com/zorneth/osg-runtime => ../osg-runtime
