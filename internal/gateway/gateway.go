@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -22,6 +23,7 @@ import (
 	"github.com/zorneth/osg-gateway/internal/store"
 	"github.com/zorneth/osg-runtime/logging"
 	"github.com/zorneth/osg-runtime/secrets"
+	"github.com/zorneth/slogx"
 )
 
 // Options configure the HTTP(S) control plane.
@@ -187,6 +189,8 @@ func Serve(ctx context.Context, opt Options) error {
 		})
 	})
 	mux.HandleFunc("/v1/sandboxes", func(w http.ResponseWriter, r *http.Request) {
+		const op = "gateway.sandboxes.list"
+		log := logging.FromContext(r.Context()).With(slog.String("op", op))
 		switch r.Method {
 		case http.MethodGet:
 			s := st.Snapshot()
@@ -194,6 +198,7 @@ func Serve(ctx context.Context, opt Options) error {
 			for _, sb := range s.Sandboxes {
 				list = append(list, sb)
 			}
+			log.Info("listed sandboxes", slog.Int("count", len(list)))
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{"sandboxes": list})
 		default:
@@ -218,30 +223,45 @@ func Serve(ctx context.Context, opt Options) error {
 		}
 		switch r.Method {
 		case http.MethodGet:
+			const op = "gateway.sandboxes.get"
+			log := logging.FromContext(r.Context()).With(slog.String("op", op), slog.String("sandbox", name))
 			sb, ok := st.GetSandbox(name)
 			if !ok {
+				log.Info("sandbox not found")
 				http.Error(w, "not found", http.StatusNotFound)
 				return
 			}
+			log.Info("sandbox fetched")
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(sb)
 		case http.MethodPut:
+			const op = "gateway.sandboxes.upsert"
+			log := logging.FromContext(r.Context()).With(slog.String("op", op), slog.String("sandbox", name))
+			log.Info("upserting sandbox")
 			var sb store.Sandbox
 			if err := json.NewDecoder(r.Body).Decode(&sb); err != nil {
+				log.Error("failed to decode sandbox body", slogx.Err(err))
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
 			sb.Name = name
 			if err := st.UpsertSandbox(sb); err != nil {
+				log.Error("failed to upsert sandbox", slogx.Err(err))
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
+			log.Info("sandbox upserted")
 			w.WriteHeader(http.StatusNoContent)
 		case http.MethodDelete:
+			const op = "gateway.sandboxes.delete"
+			log := logging.FromContext(r.Context()).With(slog.String("op", op), slog.String("sandbox", name))
+			log.Info("deleting sandbox")
 			if err := st.DeleteSandbox(name); err != nil {
+				log.Error("failed to delete sandbox", slogx.Err(err))
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
+			log.Info("sandbox deleted")
 			w.WriteHeader(http.StatusNoContent)
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -251,7 +271,7 @@ func Serve(ctx context.Context, opt Options) error {
 	mountParityAPI(mux, st, oidcValidator)
 	mountOIDCAuthAPI(mux, opt.OIDC, oidcValidator, st.AuthToken)
 	if oidcValidator != nil {
-		log.Info("oidc auth enabled", "issuer", opt.OIDC.Issuer)
+		log.Info("oidc auth enabled", slog.String("op", "gateway.oidc"), slog.String("issuer", opt.OIDC.Issuer))
 	}
 	// Fleet logs: GET /v1/logs?follow=1 lists all sandboxes' ring buffers via query names=
 	mux.HandleFunc("/v1/logs", func(w http.ResponseWriter, r *http.Request) {
@@ -316,29 +336,40 @@ func Serve(ctx context.Context, opt Options) error {
 	mux.HandleFunc("/v1/policy/global", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
+			const op = "gateway.policy.global.get"
+			log := logging.FromContext(r.Context()).With(slog.String("op", op))
 			yaml := st.GetGlobalPolicy()
+			log.Info("global policy fetched", slog.Int("bytes", len(yaml)))
 			w.Header().Set("Content-Type", "application/yaml")
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(yaml))
 		case http.MethodPut:
+			const op = "gateway.policy.global.set"
+			log := logging.FromContext(r.Context()).With(slog.String("op", op))
+			log.Info("setting global policy")
 			body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 			if err != nil {
+				log.Error("failed to read global policy body", slogx.Err(err))
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
 			doc, err := policy.Parse(body)
 			if err != nil {
+				log.Error("failed to parse global policy", slogx.Err(err))
 				http.Error(w, "invalid policy: "+err.Error(), http.StatusBadRequest)
 				return
 			}
 			if err := doc.Validate(); err != nil {
+				log.Error("global policy validation failed", slogx.Err(err))
 				http.Error(w, "invalid policy: "+err.Error(), http.StatusBadRequest)
 				return
 			}
 			if err := st.SetGlobalPolicy(string(body)); err != nil {
+				log.Error("failed to store global policy", slogx.Err(err))
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
+			log.Info("global policy set", slog.Int("bytes", len(body)))
 			w.WriteHeader(http.StatusNoContent)
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -349,18 +380,20 @@ func Serve(ctx context.Context, opt Options) error {
 		Addr:              opt.Listen,
 		Handler:           withEdgeRouter(mux, st),
 		ReadHeaderTimeout: 5 * time.Second,
+		BaseContext:       func(net.Listener) context.Context { return ctx },
 	}
 	ln, err := net.Listen("tcp", opt.Listen)
 	if err != nil {
 		return fmt.Errorf("gateway listen %s: %w", opt.Listen, err)
 	}
 	log.Info("listening",
-		"addr", opt.Listen,
-		"data_dir", opt.DataDir,
-		"gateway_id", st.Snapshot().GatewayID,
+		slog.String("op", "gateway.serve"),
+		slog.String("addr", opt.Listen),
+		slog.String("data_dir", opt.DataDir),
+		slog.String("gateway_id", st.Snapshot().GatewayID),
 	)
 	if opt.TLSCert != "" && opt.TLSKey != "" {
-		log.Info("tls enabled")
+		log.Info("tls enabled", slog.String("op", "gateway.serve"))
 		errCh := make(chan error, 1)
 		go func() { errCh <- srv.ServeTLS(ln, opt.TLSCert, opt.TLSKey) }()
 		select {

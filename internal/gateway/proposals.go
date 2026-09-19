@@ -7,12 +7,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/zorneth/osg-core/policy"
 	"github.com/zorneth/osg-gateway/internal/store"
+	"github.com/zorneth/osg-runtime/logging"
+	"github.com/zorneth/slogx"
 	"gopkg.in/yaml.v3"
 )
 
@@ -20,18 +23,26 @@ func handleSandboxProposals(w http.ResponseWriter, r *http.Request, st *store.St
 	rest = strings.Trim(rest, "/")
 	switch {
 	case rest == "" && r.Method == http.MethodGet:
+		const op = "gateway.proposals.list"
+		log := logging.FromContext(r.Context()).With(slog.String("op", op), slog.String("sandbox", name))
 		status := r.URL.Query().Get("status")
 		list := st.ListProposals(name, status)
+		log.Info("listed proposals", slog.Int("count", len(list)), slog.String("status_filter", status))
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"proposals": list})
 	case rest == "" && r.Method == http.MethodPost:
+		const op = "gateway.proposals.create"
+		log := logging.FromContext(r.Context()).With(slog.String("op", op), slog.String("sandbox", name))
+		log.Info("creating proposal")
 		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 		if err != nil {
+			log.Error("failed to read proposal body", slogx.Err(err))
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		var p store.Proposal
 		if err := json.Unmarshal(body, &p); err != nil {
+			log.Error("failed to decode proposal", slogx.Err(err))
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -43,33 +54,47 @@ func handleSandboxProposals(w http.ResponseWriter, r *http.Request, st *store.St
 			p.Status = "pending"
 		}
 		if err := st.PutProposal(p); err != nil {
+			log.Error("failed to store proposal", slogx.Err(err))
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		log.Info("proposal created", slog.String("proposal_id", p.ID), slog.String("status", p.Status))
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusAccepted)
 		_ = json.NewEncoder(w).Encode(p)
 	case rest != "" && !strings.Contains(rest, "/") && r.Method == http.MethodGet:
+		const op = "gateway.proposals.get"
+		log := logging.FromContext(r.Context()).With(slog.String("op", op), slog.String("sandbox", name), slog.String("proposal_id", rest))
 		p, ok := st.GetProposal(rest)
 		if !ok || p.Sandbox != name {
+			log.Info("proposal not found")
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
+		log.Info("proposal fetched", slog.String("status", p.Status))
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(p)
 	case strings.HasSuffix(rest, "/approve") && r.Method == http.MethodPost:
 		id := strings.TrimSuffix(rest, "/approve")
 		id = strings.Trim(id, "/")
+		const op = "gateway.proposals.approve"
+		log := logging.FromContext(r.Context()).With(slog.String("op", op), slog.String("sandbox", name), slog.String("proposal_id", id))
+		log.Info("approving proposal")
 		if err := approveProposal(st, builtinDir, name, id); err != nil {
+			log.Error("failed to approve proposal", slogx.Err(err))
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		p, _ := st.GetProposal(id)
+		log.Info("proposal approved")
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(p)
 	case strings.HasSuffix(rest, "/reject") && r.Method == http.MethodPost:
 		id := strings.TrimSuffix(rest, "/reject")
 		id = strings.Trim(id, "/")
+		const op = "gateway.proposals.reject"
+		log := logging.FromContext(r.Context()).With(slog.String("op", op), slog.String("sandbox", name), slog.String("proposal_id", id))
+		log.Info("rejecting proposal")
 		reason := ""
 		var body struct {
 			Reason string `json:"reason"`
@@ -78,13 +103,16 @@ func handleSandboxProposals(w http.ResponseWriter, r *http.Request, st *store.St
 		reason = body.Reason
 		p, err := st.DecideProposal(id, "rejected", reason)
 		if err != nil {
+			log.Error("failed to reject proposal", slogx.Err(err))
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		if p.Sandbox != name {
+			log.Info("proposal not found for sandbox")
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
+		log.Info("proposal rejected")
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(p)
 	default:
