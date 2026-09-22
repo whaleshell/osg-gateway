@@ -1,4 +1,4 @@
-package gateway
+package httpapi
 
 import (
 	"encoding/json"
@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/zorneth/osg-gateway/internal/store"
-	"github.com/zorneth/osg-runtime/idp"
-	"github.com/zorneth/osg-runtime/secrets"
+	"github.com/whaleshell/whaleshell-gateway/internal/storage/store"
+	"github.com/whaleshell/whaleshell-runtime/idp"
+	"github.com/whaleshell/whaleshell-runtime/secrets"
 )
 
 // mountParityAPI registers inference, settings, templates, whoami, and local auth.

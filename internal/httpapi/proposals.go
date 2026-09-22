@@ -1,7 +1,7 @@
-// SPDX-FileCopyrightText: Copyright (c) 2026 zorneth
+// SPDX-FileCopyrightText: Copyright (c) 2026 whaleshell
 // SPDX-License-Identifier: MIT
 
-package gateway
+package httpapi
 
 import (
 	"encoding/json"
@@ -12,10 +12,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/zorneth/osg-core/policy"
-	"github.com/zorneth/osg-gateway/internal/store"
-	"github.com/zorneth/osg-runtime/logging"
-	"github.com/zorneth/slogx"
+	"github.com/whaleshell/slogx"
+	"github.com/whaleshell/whaleshell-core/policy"
+	"github.com/whaleshell/whaleshell-gateway/internal/logger"
+	"github.com/whaleshell/whaleshell-gateway/internal/storage/store"
 	"gopkg.in/yaml.v3"
 )
 
@@ -24,7 +24,7 @@ func handleSandboxProposals(w http.ResponseWriter, r *http.Request, st *store.St
 	switch {
 	case rest == "" && r.Method == http.MethodGet:
 		const op = "gateway.proposals.list"
-		log := logging.FromContext(r.Context()).With(slog.String("op", op), slog.String("sandbox", name))
+		log := logger.FromContext(r.Context()).With(slog.String("op", op), slog.String("sandbox", name))
 		status := r.URL.Query().Get("status")
 		list := st.ListProposals(name, status)
 		log.Info("listed proposals", slog.Int("count", len(list)), slog.String("status_filter", status))
@@ -32,7 +32,7 @@ func handleSandboxProposals(w http.ResponseWriter, r *http.Request, st *store.St
 		_ = json.NewEncoder(w).Encode(map[string]any{"proposals": list})
 	case rest == "" && r.Method == http.MethodPost:
 		const op = "gateway.proposals.create"
-		log := logging.FromContext(r.Context()).With(slog.String("op", op), slog.String("sandbox", name))
+		log := logger.FromContext(r.Context()).With(slog.String("op", op), slog.String("sandbox", name))
 		log.Info("creating proposal")
 		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 		if err != nil {
@@ -64,7 +64,7 @@ func handleSandboxProposals(w http.ResponseWriter, r *http.Request, st *store.St
 		_ = json.NewEncoder(w).Encode(p)
 	case rest != "" && !strings.Contains(rest, "/") && r.Method == http.MethodGet:
 		const op = "gateway.proposals.get"
-		log := logging.FromContext(r.Context()).With(slog.String("op", op), slog.String("sandbox", name), slog.String("proposal_id", rest))
+		log := logger.FromContext(r.Context()).With(slog.String("op", op), slog.String("sandbox", name), slog.String("proposal_id", rest))
 		p, ok := st.GetProposal(rest)
 		if !ok || p.Sandbox != name {
 			log.Info("proposal not found")
@@ -78,7 +78,7 @@ func handleSandboxProposals(w http.ResponseWriter, r *http.Request, st *store.St
 		id := strings.TrimSuffix(rest, "/approve")
 		id = strings.Trim(id, "/")
 		const op = "gateway.proposals.approve"
-		log := logging.FromContext(r.Context()).With(slog.String("op", op), slog.String("sandbox", name), slog.String("proposal_id", id))
+		log := logger.FromContext(r.Context()).With(slog.String("op", op), slog.String("sandbox", name), slog.String("proposal_id", id))
 		log.Info("approving proposal")
 		if err := approveProposal(st, builtinDir, name, id); err != nil {
 			log.Error("failed to approve proposal", slogx.Err(err))
@@ -93,7 +93,7 @@ func handleSandboxProposals(w http.ResponseWriter, r *http.Request, st *store.St
 		id := strings.TrimSuffix(rest, "/reject")
 		id = strings.Trim(id, "/")
 		const op = "gateway.proposals.reject"
-		log := logging.FromContext(r.Context()).With(slog.String("op", op), slog.String("sandbox", name), slog.String("proposal_id", id))
+		log := logger.FromContext(r.Context()).With(slog.String("op", op), slog.String("sandbox", name), slog.String("proposal_id", id))
 		log.Info("rejecting proposal")
 		reason := ""
 		var body struct {

@@ -1,4 +1,4 @@
-package gateway
+package httpapi
 
 import (
 	"fmt"
@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/zorneth/osg-gateway/internal/store"
+	"github.com/whaleshell/whaleshell-gateway/internal/storage/store"
 )
 
 func TestEdgeServiceName(t *testing.T) {
@@ -17,7 +17,7 @@ func TestEdgeServiceName(t *testing.T) {
 	if !ok || name != "web" {
 		t.Fatalf("got %q %v", name, ok)
 	}
-	name, ok = edgeServiceName("api.osg.localhost")
+	name, ok = edgeServiceName("api.whaleshell.localhost")
 	if !ok || name != "api" {
 		t.Fatalf("got %q %v", name, ok)
 	}

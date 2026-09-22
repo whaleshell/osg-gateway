@@ -1,4 +1,4 @@
-package gateway
+package httpapi
 
 import (
 	"encoding/json"
@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/zorneth/osg-gateway/internal/store"
+	"github.com/whaleshell/whaleshell-gateway/internal/storage/store"
 )
 
 // rotateCredential performs strategy-specific credential refresh and returns

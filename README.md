@@ -1,26 +1,26 @@
-<h1 align="center">osg-gateway</h1>
+<h1 align="center">whaleshell-gateway</h1>
 
 <p align="center">
   <strong>Control-plane registry & relay</strong><br>
   HTTP registry for sandboxes, providers, policy, proposals, and relayed exec.
 </p>
 <p align="center">
-  <a href="https://github.com/zorneth/osg-gateway/actions/workflows/ci.yml"><img src="https://github.com/zorneth/osg-gateway/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://pkg.go.dev/github.com/zorneth/osg-gateway"><img src="https://pkg.go.dev/badge/github.com/zorneth/osg-gateway.svg" alt="Go Reference"></a>
+  <a href="https://github.com/whaleshell/whaleshell-gateway/actions/workflows/ci.yml"><img src="https://github.com/whaleshell/whaleshell-gateway/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://pkg.go.dev/github.com/whaleshell/whaleshell-gateway"><img src="https://pkg.go.dev/badge/github.com/whaleshell/whaleshell-gateway.svg" alt="Go Reference"></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License"></a>
-  <a href="https://github.com/zorneth/osg-gateway"><img src="https://img.shields.io/badge/Go-1.27+-00ADD8?logo=go" alt="Go Version"></a>
+  <a href="https://github.com/whaleshell/whaleshell-gateway"><img src="https://img.shields.io/badge/Go-1.27+-00ADD8?logo=go" alt="Go Version"></a>
 
-  <a href="https://github.com/zorneth/osg-gateway/actions/workflows/images-gateway.yml"><img src="https://github.com/zorneth/osg-gateway/actions/workflows/images-gateway.yml/badge.svg" alt="images-gateway"></a>
+  <a href="https://github.com/whaleshell/whaleshell-gateway/actions/workflows/images-gateway.yml"><img src="https://github.com/whaleshell/whaleshell-gateway/actions/workflows/images-gateway.yml/badge.svg" alt="images-gateway"></a>
 </p>
 <p align="center">
-  <sub>Part of the <a href="https://github.com/zorneth">zorneth / osg</a> ecosystem</sub>
+  <sub>Part of the <a href="https://github.com/whaleshell">whaleshell / whaleshell</a> ecosystem</sub>
 </p>
 
 ---
 
 ## Overview
 
-**osg-gateway** is the optional control-plane daemon. Sandboxes register here; the CLI and SDKs talk HTTP for inventory, effective policy, provider attach, policy proposals, logs, and relayed exec.
+**whaleshell-gateway** is the optional control-plane daemon. Sandboxes register here; the CLI and SDKs talk HTTP for inventory, effective policy, provider attach, policy proposals, logs, and relayed exec.
 
 ### Key Features
 
@@ -29,32 +29,32 @@
 | **Registry** | Sandbox upsert / list / delete |
 | **Policy** | Base + effective policy; provider attach |
 | **Proposals** | Store / approve / reject (`policy.local` sync) |
-| **Relay** | Long-poll exec for `osg-agent` guests |
-| **Image** | `ghcr.io/zorneth/osg/gateway` |
+| **Relay** | Long-poll exec for `whaleshell-agent` guests |
+| **Image** | `ghcr.io/whaleshell/whaleshell/gateway` |
 
 ---
 
 ## Installation
 
 ```bash
-go install github.com/zorneth/osg-gateway/cmd/osg-gateway@latest
+go install github.com/whaleshell/whaleshell-gateway/cmd/whaleshell-gateway@latest
 # or:
-go build -o osg-gateway ./cmd/osg-gateway
-./osg-gateway --listen 127.0.0.1:7443
+go build -o whaleshell-gateway ./cmd/whaleshell-gateway
+./whaleshell-gateway --listen 127.0.0.1:7443
 ```
 
 **Requirements:** Go 1.27+
 
-**Container:** `ghcr.io/zorneth/osg/gateway:latest`
+**Container:** `ghcr.io/whaleshell/whaleshell/gateway:latest`
 
 ---
 
 ## Quick Start
 
 ```bash
-./osg-gateway --listen 127.0.0.1:7443 &
-osg gateway add http://127.0.0.1:7443 --local --name local
-osg gateway select local
+./whaleshell-gateway --listen 127.0.0.1:7443 &
+whaleshell gateway add http://127.0.0.1:7443 --local --name local
+whaleshell gateway select local
 curl -s http://127.0.0.1:7443/healthz
 ```
 
@@ -69,7 +69,7 @@ curl -s http://127.0.0.1:7443/healthz
 | GET/POST | `/v1/sandboxes/{name}/proposals` | policy advisor chunks |
 | GET | `/v1/profiles` | provider profiles |
 
-Durable state: `$XDG_STATE_HOME/osg/gateway/state.json`.
+Durable state: `$XDG_STATE_HOME/whaleshell/gateway/state.json`.
 
 ---
 
@@ -77,7 +77,7 @@ Durable state: `$XDG_STATE_HOME/osg/gateway/state.json`.
 
 | Path | Purpose |
 |------|---------|
-| `cmd/osg-gateway` | Daemon entrypoint |
+| `cmd/whaleshell-gateway` | Daemon entrypoint |
 | `internal/` | HTTP handlers, state, relay |
 
 
@@ -88,10 +88,10 @@ Durable state: `$XDG_STATE_HOME/osg/gateway/state.json`.
 | Resource | Link |
 |----------|------|
 | Roadmap | [ROADMAP.md](./ROADMAP.md) |
-| Organization | [https://github.com/zorneth](https://github.com/zorneth) |
-| Organization overview | [github.com/zorneth](https://github.com/zorneth) |
-| pkg.go.dev | [`github.com/zorneth/osg-gateway`](https://pkg.go.dev/github.com/zorneth/osg-gateway) |
+| Organization | [https://github.com/whaleshell](https://github.com/whaleshell) |
+| Organization overview | [github.com/whaleshell](https://github.com/whaleshell) |
+| pkg.go.dev | [`github.com/whaleshell/whaleshell-gateway`](https://pkg.go.dev/github.com/whaleshell/whaleshell-gateway) |
 
 ## License
 
-[MIT](./LICENSE) © zorneth
+[MIT](./LICENSE) © whaleshell

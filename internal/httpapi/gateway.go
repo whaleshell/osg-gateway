@@ -1,5 +1,5 @@
 // Package gateway is the control-plane daemon (P8).
-package gateway
+package httpapi
 
 import (
 	"context"
@@ -16,14 +16,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/zorneth/osg-core/defaults"
-	"github.com/zorneth/osg-core/policy"
-	"github.com/zorneth/osg-gateway/internal/logbuf"
-	"github.com/zorneth/osg-gateway/internal/relay"
-	"github.com/zorneth/osg-gateway/internal/store"
-	"github.com/zorneth/osg-runtime/logging"
-	"github.com/zorneth/osg-runtime/secrets"
-	"github.com/zorneth/slogx"
+	"github.com/whaleshell/slogx"
+	"github.com/whaleshell/whaleshell-core/defaults"
+	"github.com/whaleshell/whaleshell-core/policy"
+	"github.com/whaleshell/whaleshell-gateway/internal/logbuf"
+	"github.com/whaleshell/whaleshell-gateway/internal/logger"
+	"github.com/whaleshell/whaleshell-gateway/internal/relay"
+	"github.com/whaleshell/whaleshell-gateway/internal/storage/store"
+	"github.com/whaleshell/whaleshell-runtime/secrets"
 )
 
 // Options configure the HTTP(S) control plane.
@@ -39,8 +39,8 @@ type Options struct {
 func Run(args []string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	log := logging.Setup(ctx, logging.Options{Service: "osg-gateway"})
-	ctx = logging.ToContext(ctx, log)
+	log := logger.Setup(ctx, logger.Options{Service: "whaleshell-gateway"})
+	ctx = logger.ToContext(ctx, log)
 
 	opt := Options{
 		Listen:  defaults.GatewayListen,
@@ -93,7 +93,7 @@ func Run(args []string) error {
 		case "--oidc-allow-insecure-http":
 			opt.OIDC.AllowInsecureHTTP = true
 		case "-h", "--help":
-			fmt.Fprintf(os.Stderr, "usage: osg-gateway [--listen ADDR] [--data-dir DIR] [--tls-cert F] [--tls-key F]\n")
+			fmt.Fprintf(os.Stderr, "usage: whaleshell-gateway [--listen ADDR] [--data-dir DIR] [--tls-cert F] [--tls-key F]\n")
 			fmt.Fprintf(os.Stderr, "                 [--oidc-issuer URL] [--oidc-client-id ID] [--oidc-audience AUD]\n")
 			fmt.Fprintf(os.Stderr, "                 [--oidc-allow-insecure-http]\n")
 			return nil
@@ -107,13 +107,13 @@ func Run(args []string) error {
 
 func defaultDataDir() string {
 	if xdg := os.Getenv("XDG_STATE_HOME"); xdg != "" {
-		return filepath.Join(xdg, "osg", "gateway")
+		return filepath.Join(xdg, "whaleshell", "gateway")
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return filepath.Join(os.TempDir(), "osg-gateway")
+		return filepath.Join(os.TempDir(), "whaleshell-gateway")
 	}
-	return filepath.Join(home, ".local", "state", "osg", "gateway")
+	return filepath.Join(home, ".local", "state", "whaleshell", "gateway")
 }
 
 func newGatewayID() string {
@@ -127,7 +127,7 @@ func Serve(ctx context.Context, opt Options) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	log := logging.FromContext(ctx)
+	log := logger.FromContext(ctx)
 	if opt.Listen == "" {
 		opt.Listen = defaults.GatewayListen
 	}
@@ -178,7 +178,7 @@ func Serve(ctx context.Context, opt Options) error {
 			"data_dir":          opt.DataDir,
 			"auth_mode":         authMode,
 			"oidc_issuer":       opt.OIDC.Issuer,
-			"host_osg_internal": "host.osg.internal → host-gateway (Docker)",
+			"host_osg_internal": "host.whaleshell.internal → host-gateway (Docker)",
 			"relay":             "long-poll /v1/relay/{name}/poll|exec|result",
 			"secrets_kek": map[string]any{
 				"source":  string(kek.Source),
@@ -190,7 +190,7 @@ func Serve(ctx context.Context, opt Options) error {
 	})
 	mux.HandleFunc("/v1/sandboxes", func(w http.ResponseWriter, r *http.Request) {
 		const op = "gateway.sandboxes.list"
-		log := logging.FromContext(r.Context()).With(slog.String("op", op))
+		log := logger.FromContext(r.Context()).With(slog.String("op", op))
 		switch r.Method {
 		case http.MethodGet:
 			s := st.Snapshot()
@@ -224,7 +224,7 @@ func Serve(ctx context.Context, opt Options) error {
 		switch r.Method {
 		case http.MethodGet:
 			const op = "gateway.sandboxes.get"
-			log := logging.FromContext(r.Context()).With(slog.String("op", op), slog.String("sandbox", name))
+			log := logger.FromContext(r.Context()).With(slog.String("op", op), slog.String("sandbox", name))
 			sb, ok := st.GetSandbox(name)
 			if !ok {
 				log.Info("sandbox not found")
@@ -236,7 +236,7 @@ func Serve(ctx context.Context, opt Options) error {
 			_ = json.NewEncoder(w).Encode(sb)
 		case http.MethodPut:
 			const op = "gateway.sandboxes.upsert"
-			log := logging.FromContext(r.Context()).With(slog.String("op", op), slog.String("sandbox", name))
+			log := logger.FromContext(r.Context()).With(slog.String("op", op), slog.String("sandbox", name))
 			log.Info("upserting sandbox")
 			var sb store.Sandbox
 			if err := json.NewDecoder(r.Body).Decode(&sb); err != nil {
@@ -254,7 +254,7 @@ func Serve(ctx context.Context, opt Options) error {
 			w.WriteHeader(http.StatusNoContent)
 		case http.MethodDelete:
 			const op = "gateway.sandboxes.delete"
-			log := logging.FromContext(r.Context()).With(slog.String("op", op), slog.String("sandbox", name))
+			log := logger.FromContext(r.Context()).With(slog.String("op", op), slog.String("sandbox", name))
 			log.Info("deleting sandbox")
 			if err := st.DeleteSandbox(name); err != nil {
 				log.Error("failed to delete sandbox", slogx.Err(err))
@@ -337,7 +337,7 @@ func Serve(ctx context.Context, opt Options) error {
 		switch r.Method {
 		case http.MethodGet:
 			const op = "gateway.policy.global.get"
-			log := logging.FromContext(r.Context()).With(slog.String("op", op))
+			log := logger.FromContext(r.Context()).With(slog.String("op", op))
 			yaml := st.GetGlobalPolicy()
 			log.Info("global policy fetched", slog.Int("bytes", len(yaml)))
 			w.Header().Set("Content-Type", "application/yaml")
@@ -345,7 +345,7 @@ func Serve(ctx context.Context, opt Options) error {
 			_, _ = w.Write([]byte(yaml))
 		case http.MethodPut:
 			const op = "gateway.policy.global.set"
-			log := logging.FromContext(r.Context()).With(slog.String("op", op))
+			log := logger.FromContext(r.Context()).With(slog.String("op", op))
 			log.Info("setting global policy")
 			body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 			if err != nil {

@@ -1,4 +1,4 @@
-// Package store persists osg-gateway registry state as JSON on disk.
+// Package store persists whaleshell-gateway registry state as JSON on disk.
 package store
 
 import (

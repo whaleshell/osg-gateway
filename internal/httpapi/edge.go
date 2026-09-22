@@ -1,4 +1,4 @@
-package gateway
+package httpapi
 
 import (
 	"fmt"
@@ -8,15 +8,15 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/zorneth/osg-gateway/internal/store"
+	"github.com/whaleshell/whaleshell-gateway/internal/storage/store"
 )
 
 const (
 	edgeSuffixOpenShell = ".openshell.localhost"
-	edgeSuffixOSG       = ".osg.localhost"
+	edgeSuffixOSG       = ".whaleshell.localhost"
 )
 
-// withEdgeRouter proxies Host *.openshell.localhost / *.osg.localhost to registered services.
+// withEdgeRouter proxies Host *.openshell.localhost / *.whaleshell.localhost to registered services.
 // Other requests fall through to the control-plane mux (.localhost resolves to 127.0.0.1).
 func withEdgeRouter(next http.Handler, st *store.Store) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -1,4 +1,4 @@
-package gateway
+package httpapi
 
 import (
 	"context"
@@ -11,11 +11,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/zorneth/osg-core/policy"
-	"github.com/zorneth/osg-gateway/internal/logbuf"
-	"github.com/zorneth/osg-gateway/internal/store"
-	"github.com/zorneth/osg-providers/provider"
-	"github.com/zorneth/osg-runtime/secrets"
+	"github.com/whaleshell/whaleshell-core/policy"
+	"github.com/whaleshell/whaleshell-gateway/internal/logbuf"
+	"github.com/whaleshell/whaleshell-gateway/internal/storage/store"
+	"github.com/whaleshell/whaleshell-providers/provider"
+	"github.com/whaleshell/whaleshell-runtime/secrets"
 	"gopkg.in/yaml.v3"
 )
 
@@ -359,7 +359,7 @@ func handleSandboxPolicy(w http.ResponseWriter, r *http.Request, st *store.Store
 		}
 		w.Header().Set("Content-Type", "application/yaml")
 		if stripped > 0 {
-			w.Header().Set("X-Osg-Stripped-Provider-Rules", fmt.Sprintf("%d", stripped))
+			w.Header().Set("X-Whaleshell-Stripped-Provider-Rules", fmt.Sprintf("%d", stripped))
 		}
 		_, _ = w.Write(eff)
 	default:
@@ -622,7 +622,7 @@ func effectivePolicy(st *store.Store, builtinDir, sandbox string) (policy.Docume
 	return out, nil
 }
 
-// BuiltinProvidersDir tries to locate osg-cli/providers next to the module.
+// BuiltinProvidersDir tries to locate whaleshell-cli/providers next to the module.
 func BuiltinProvidersDir() string {
 	return provider.FindBuiltinDir()
 }

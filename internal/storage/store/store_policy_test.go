@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/zorneth/osg-gateway/internal/store"
+	"github.com/whaleshell/whaleshell-gateway/internal/storage/store"
 )
 
 func TestSetBasePolicyTracksRevisions(t *testing.T) {

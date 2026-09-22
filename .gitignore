@@ -2,6 +2,6 @@
 *.test
 *.out
 /osg
-/osg-init
-/osg-gateway
+/whaleshell-init
+/whaleshell-gateway
 .DS_Store

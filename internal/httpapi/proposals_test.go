@@ -1,7 +1,7 @@
-// SPDX-FileCopyrightText: Copyright (c) 2026 zorneth
+// SPDX-FileCopyrightText: Copyright (c) 2026 whaleshell
 // SPDX-License-Identifier: MIT
 
-package gateway
+package httpapi
 
 import (
 	"strings"
