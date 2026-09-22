@@ -41,35 +41,37 @@ jobs:
       - name: Checkout deps
         uses: actions/checkout@v4
         with:
-          repository: zorneth/osg-core
+          repository: whaleshell/osg-core
           path: whaleshell-core
       - uses: actions/checkout@v4
         with:
-          repository: zorneth/osg-providers
+          repository: whaleshell/osg-providers
           path: whaleshell-providers
       - uses: actions/checkout@v4
         with:
-          repository: zorneth/osg-runtime
+          repository: whaleshell/osg-runtime
           path: whaleshell-runtime
       - uses: actions/checkout@v4
         with:
-          repository: zorneth/osg-proxy
+          repository: whaleshell/osg-proxy
           path: whaleshell-proxy
       - uses: actions/checkout@v4
         with:
-          repository: zorneth/osg-driver
+          repository: whaleshell/osg-driver
           path: whaleshell-driver
       - uses: actions/checkout@v4
         with:
-          repository: zorneth/osg-sdk
+          repository: whaleshell/osg-sdk
           path: whaleshell-sdk
 
       - name: Checkout slogx
         uses: actions/checkout@v4
         with:
-          repository: zorneth/slogx
+          repository: whaleshell/slogx
           path: slogx
       - name: Write go.work
+        working-directory: ${{ github.workspace }}
+        shell: bash
         run: |
           set -euo pipefail
           {
@@ -97,6 +99,9 @@ jobs:
         with:
           go-version: "1.27"
           cache: true
+          cache-dependency-path: |
+            whaleshell-*/go.sum
+            slogx/go.sum
       - uses: docker/setup-buildx-action@v3
       - name: Login GHCR
         if: github.event_name != 'pull_request'
