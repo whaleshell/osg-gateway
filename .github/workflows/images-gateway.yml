@@ -27,7 +27,7 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE: ghcr.io/whaleshell/osg/gateway
+  IMAGE: ghcr.io/whaleshell/whaleshell/gateway
   GOWORK: ${{ github.workspace }}/go.work
 
 jobs:
@@ -41,27 +41,27 @@ jobs:
       - name: Checkout deps
         uses: actions/checkout@v4
         with:
-          repository: whaleshell/osg-core
+          repository: whaleshell/whaleshell-core
           path: whaleshell-core
       - uses: actions/checkout@v4
         with:
-          repository: whaleshell/osg-providers
+          repository: whaleshell/whaleshell-providers
           path: whaleshell-providers
       - uses: actions/checkout@v4
         with:
-          repository: whaleshell/osg-runtime
+          repository: whaleshell/whaleshell-runtime
           path: whaleshell-runtime
       - uses: actions/checkout@v4
         with:
-          repository: whaleshell/osg-proxy
+          repository: whaleshell/whaleshell-proxy
           path: whaleshell-proxy
       - uses: actions/checkout@v4
         with:
-          repository: whaleshell/osg-driver
+          repository: whaleshell/whaleshell-driver
           path: whaleshell-driver
       - uses: actions/checkout@v4
         with:
-          repository: whaleshell/osg-sdk
+          repository: whaleshell/whaleshell-sdk
           path: whaleshell-sdk
 
       - name: Checkout slogx
