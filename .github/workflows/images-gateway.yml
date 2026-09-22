@@ -27,7 +27,7 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE: ghcr.io/zorneth/osg/gateway
+  IMAGE: ghcr.io/whaleshell/osg/gateway
   GOWORK: ${{ github.workspace }}/go.work
 
 jobs:
