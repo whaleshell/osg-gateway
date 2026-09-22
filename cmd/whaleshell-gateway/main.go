@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/whaleshell/whaleshell-gateway/app/gateway"
+	"github.com/whaleshell/whaleshell-gateway/internal/app/gateway"
 )
 
 func main() {

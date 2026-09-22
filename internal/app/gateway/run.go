@@ -2,7 +2,7 @@
 package gateway
 
 import (
-	"github.com/whaleshell/whaleshell-gateway/config"
+	"github.com/whaleshell/whaleshell-gateway/internal/config"
 	"github.com/whaleshell/whaleshell-gateway/internal/httpapi"
 )
 
