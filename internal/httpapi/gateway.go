@@ -261,6 +261,7 @@ func Serve(ctx context.Context, opt Options) error {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
+			logs.Remove(name)
 			log.Info("sandbox deleted")
 			w.WriteHeader(http.StatusNoContent)
 		default:

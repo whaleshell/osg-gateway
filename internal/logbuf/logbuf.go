@@ -78,6 +78,18 @@ func (h *Hub) Names() []string {
 	return out
 }
 
+// Remove drops the ring buffer for a sandbox (call on sandbox delete).
+// OpenShell TracingLogBus.remove cleans the same way; without this, deleted
+// names keep up to max lines in gateway RSS until process restart.
+func (h *Hub) Remove(sandbox string) {
+	if h == nil || sandbox == "" {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.buffers, sandbox)
+}
+
 func (b *Buffer) append(lines []Line) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
