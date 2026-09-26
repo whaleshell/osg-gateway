@@ -73,37 +73,6 @@ func mountOIDCAuthAPI(mux *http.ServeMux, oidcCfg OIDCOptions, validator *idp.OI
 		})
 	})
 
-	// Keep /v1/auth/login for local-dev; when OIDC is on, still allow local mint for loopback ops
-	// but whoami prefers JWT validation below via resolveIdentity.
 	_ = validator
 	_ = localToken
-}
-
-// identityFromRequest resolves Bearer auth: OIDC JWT if configured, else local-dev token.
-func identityFromRequest(r *http.Request, validator *idp.OIDC, localToken string) (subject, auth, idpName string) {
-	tok := bearerToken(r)
-	if tok == "" {
-		return "anonymous", "anonymous", "none"
-	}
-	if validator != nil {
-		claims, err := validator.Validate(r.Context(), tok)
-		if err == nil {
-			sub := claims.Subject
-			if sub == "" {
-				sub = claims.Email
-			}
-			if sub == "" {
-				sub = "oidc-user"
-			}
-			return sub, "authenticated", "oidc"
-		}
-		// fall through: may still be local-dev token when both modes enabled
-	}
-	if localToken != "" && tok == localToken {
-		return "local-dev", "authenticated", "local"
-	}
-	if validator != nil {
-		return "anonymous", "invalid_token", "oidc"
-	}
-	return "anonymous", "invalid_token", "local"
 }

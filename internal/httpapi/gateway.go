@@ -19,9 +19,10 @@ import (
 	"github.com/whaleshell/slogx"
 	"github.com/whaleshell/whaleshell-core/defaults"
 	"github.com/whaleshell/whaleshell-core/policy"
+	"github.com/whaleshell/whaleshell-core/relayproto"
 	"github.com/whaleshell/whaleshell-gateway/internal/logbuf"
 	"github.com/whaleshell/whaleshell-gateway/internal/logger"
-	"github.com/whaleshell/whaleshell-gateway/internal/relay"
+	"github.com/whaleshell/whaleshell-gateway/internal/sshrelay"
 	"github.com/whaleshell/whaleshell-gateway/internal/storage/store"
 	"github.com/whaleshell/whaleshell-runtime/secrets"
 )
@@ -33,7 +34,18 @@ type Options struct {
 	TLSCert string // optional
 	TLSKey  string // optional
 	OIDC    OIDCOptions
+	// SSHSessionTTL bounds SSH session tokens (OpenShell ssh_session_ttl_secs).
+	// Zero selects DefaultSSHSessionTTL; negative disables expiry.
+	SSHSessionTTL time.Duration
+	// AllowUnauthenticated is the unsafe OpenShell allow_unauthenticated_users switch.
+	AllowUnauthenticated bool
 }
+
+// EnvAllowUnauthenticated enables Options.AllowUnauthenticated (unsafe, dev only).
+const EnvAllowUnauthenticated = "WHALESHELL_GATEWAY_ALLOW_UNAUTHENTICATED"
+
+// EnvSSHSessionTTL overrides the SSH session TTL in seconds (0 = no expiry).
+const EnvSSHSessionTTL = "WHALESHELL_SSH_SESSION_TTL_SECS"
 
 // Run starts the gateway until context cancel / signal via ListenAndServe.
 func Run(args []string) error {
@@ -92,17 +104,60 @@ func Run(args []string) error {
 			opt.OIDC.ClientID = args[i]
 		case "--oidc-allow-insecure-http":
 			opt.OIDC.AllowInsecureHTTP = true
+		case "--ssh-session-ttl-secs":
+			i++
+			if i >= len(args) {
+				return fmt.Errorf("--ssh-session-ttl-secs needs a value")
+			}
+			ttl, err := parseTTLSecs(args[i])
+			if err != nil {
+				return fmt.Errorf("--ssh-session-ttl-secs: %w", err)
+			}
+			opt.SSHSessionTTL = ttl
+		case "--allow-unauthenticated-users":
+			opt.AllowUnauthenticated = true
 		case "-h", "--help":
 			fmt.Fprintf(os.Stderr, "usage: whaleshell-gateway [--listen ADDR] [--data-dir DIR] [--tls-cert F] [--tls-key F]\n")
 			fmt.Fprintf(os.Stderr, "                 [--oidc-issuer URL] [--oidc-client-id ID] [--oidc-audience AUD]\n")
-			fmt.Fprintf(os.Stderr, "                 [--oidc-allow-insecure-http]\n")
+			fmt.Fprintf(os.Stderr, "                 [--oidc-allow-insecure-http] [--ssh-session-ttl-secs N]\n")
+			fmt.Fprintf(os.Stderr, "                 [--allow-unauthenticated-users]  (unsafe: local development only)\n")
 			return nil
 		default:
 			return fmt.Errorf("unknown flag %q", args[i])
 		}
 	}
 	oidcFromEnvAndFlags(&opt)
+	if err := authFromEnv(&opt); err != nil {
+		return err
+	}
 	return Serve(ctx, opt)
+}
+
+func parseTTLSecs(s string) (time.Duration, error) {
+	var n int64
+	if _, err := fmt.Sscanf(strings.TrimSpace(s), "%d", &n); err != nil || n < 0 {
+		return 0, fmt.Errorf("want seconds >= 0, got %q", s)
+	}
+	if n == 0 {
+		return -1, nil
+	}
+	return time.Duration(n) * time.Second, nil
+}
+
+func authFromEnv(opt *Options) error {
+	if v := strings.ToLower(strings.TrimSpace(os.Getenv(EnvAllowUnauthenticated))); v == "1" || v == "true" || v == "yes" {
+		opt.AllowUnauthenticated = true
+	}
+	if opt.SSHSessionTTL == 0 {
+		if v := strings.TrimSpace(os.Getenv(EnvSSHSessionTTL)); v != "" {
+			ttl, err := parseTTLSecs(v)
+			if err != nil {
+				return fmt.Errorf("%s: %w", EnvSSHSessionTTL, err)
+			}
+			opt.SSHSessionTTL = ttl
+		}
+	}
+	return nil
 }
 
 func defaultDataDir() string {
@@ -127,30 +182,66 @@ func Serve(ctx context.Context, opt Options) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	log := logger.FromContext(ctx)
 	if opt.Listen == "" {
 		opt.Listen = defaults.GatewayListen
 	}
+	handler, err := NewHandler(ctx, opt)
+	if err != nil {
+		return err
+	}
+	return listenAndServe(ctx, opt, handler)
+}
+
+// NewHandler builds the authenticated gateway HTTP handler and starts the SSH
+// session reaper (stopped when ctx ends).
+func NewHandler(ctx context.Context, opt Options) (http.Handler, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	log := logger.FromContext(ctx)
 	if opt.DataDir == "" {
 		opt.DataDir = defaultDataDir()
 	}
 	st, err := store.Open(opt.DataDir, newGatewayID())
 	if err != nil {
-		return err
+		return nil, err
+	}
+	tokenPath, err := st.WriteAuthTokenFile()
+	if err != nil {
+		return nil, fmt.Errorf("gateway auth token: %w", err)
 	}
 	sec, err := secrets.OpenLocal(opt.DataDir)
 	if err != nil {
-		return fmt.Errorf("gateway secrets: %w", err)
+		return nil, fmt.Errorf("gateway secrets: %w", err)
 	}
 	oidcFromEnvAndFlags(&opt)
 	oidcValidator, err := newOIDCValidator(opt.OIDC)
 	if err != nil {
-		return fmt.Errorf("gateway oidc: %w", err)
+		return nil, fmt.Errorf("gateway oidc: %w", err)
+	}
+	ttl := opt.SSHSessionTTL
+	if ttl == 0 {
+		ttl = DefaultSSHSessionTTL
+	}
+	if ttl < 0 {
+		ttl = 0
 	}
 	logs := logbuf.NewHub(4096)
-	hub := relay.NewHub()
+	relayHub := sshrelay.NewHub()
+	relayHub.Log = log.Logger
+	ssh := &sshAPI{st: st, hub: relayHub, sessionTTL: ttl, log: log.Logger}
+	go reapSSHSessions(ctx, st, log.Logger)
+	log.Info("auth enabled",
+		slog.String("op", "gateway.auth"),
+		slog.String("token_file", tokenPath),
+		slog.Bool("oidc", oidcValidator != nil),
+		slog.Bool("allow_unauthenticated", opt.AllowUnauthenticated))
+	if opt.AllowUnauthenticated {
+		log.Warn("UNSAFE: --allow-unauthenticated-users: requests without a bearer act as an operator",
+			slog.String("op", "gateway.auth"))
+	}
 	mux := http.NewServeMux()
-	hub.Mount(mux)
+	ssh.mount(mux)
 	mux.Handle("/debug/loglevel", log.LevelHTTPHandler())
 	mux.Handle("/debug/loglevel/", log.LevelHTTPHandler())
 
@@ -179,7 +270,8 @@ func Serve(ctx context.Context, opt Options) error {
 			"auth_mode":         authMode,
 			"oidc_issuer":       opt.OIDC.Issuer,
 			"host_osg_internal": "host.whaleshell.internal → host-gateway (Docker)",
-			"relay":             "long-poll /v1/relay/{name}/poll|exec|result",
+			"relay":             "supervisor relay: " + relayproto.PathSupervisorConnect + " + " + relayproto.PathSSHConnect,
+			"ssh_session_ttl_s": int64(ttl / time.Second),
 			"secrets_kek": map[string]any{
 				"source":  string(kek.Source),
 				"pinned":  kek.Pinned,
@@ -218,6 +310,9 @@ func Serve(ctx context.Context, opt Options) error {
 			return
 		}
 		if hasSub {
+			if ssh.sandboxSubpath(w, r, name, strings.Trim(sub, "/")) {
+				return
+			}
 			handleSandboxSubpath(w, r, st, sec, logs, BuiltinProvidersDir(), name, sub)
 			return
 		}
@@ -261,6 +356,7 @@ func Serve(ctx context.Context, opt Options) error {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
+			relayHub.Disconnect(name)
 			logs.Remove(name)
 			log.Info("sandbox deleted")
 			w.WriteHeader(http.StatusNoContent)
@@ -377,9 +473,41 @@ func Serve(ctx context.Context, opt Options) error {
 		}
 	})
 
+	auth := withAuth(mux, st, AuthOptions{
+		OIDC:                 oidcValidator,
+		AllowUnauthenticated: opt.AllowUnauthenticated,
+		Log:                  log.Logger,
+	})
+	log.Info("gateway ready",
+		slog.String("op", "gateway.serve"),
+		slog.String("data_dir", opt.DataDir),
+		slog.String("gateway_id", st.Snapshot().GatewayID),
+	)
+	return withEdgeRouter(auth, st), nil
+}
+
+func reapSSHSessions(ctx context.Context, st *store.Store, log *slog.Logger) {
+	t := time.NewTicker(time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-t.C:
+			if n, err := st.ReapSSHSessions(now); err != nil {
+				log.Warn("ssh session reap failed", slog.String("op", "gateway.ssh.reap"), slogx.Err(err))
+			} else if n > 0 {
+				log.Info("reaped ssh sessions", slog.String("op", "gateway.ssh.reap"), slog.Int("count", n))
+			}
+		}
+	}
+}
+
+func listenAndServe(ctx context.Context, opt Options, handler http.Handler) error {
+	log := logger.FromContext(ctx)
 	srv := &http.Server{
 		Addr:              opt.Listen,
-		Handler:           withEdgeRouter(mux, st),
+		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		BaseContext:       func(net.Listener) context.Context { return ctx },
 	}
@@ -387,12 +515,7 @@ func Serve(ctx context.Context, opt Options) error {
 	if err != nil {
 		return fmt.Errorf("gateway listen %s: %w", opt.Listen, err)
 	}
-	log.Info("listening",
-		slog.String("op", "gateway.serve"),
-		slog.String("addr", opt.Listen),
-		slog.String("data_dir", opt.DataDir),
-		slog.String("gateway_id", st.Snapshot().GatewayID),
-	)
+	log.Info("listening", slog.String("op", "gateway.serve"), slog.String("addr", opt.Listen))
 	if opt.TLSCert != "" && opt.TLSKey != "" {
 		log.Info("tls enabled", slog.String("op", "gateway.serve"))
 		errCh := make(chan error, 1)

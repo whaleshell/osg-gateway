@@ -28,6 +28,10 @@ type State struct {
 	Services         map[string]ServiceRecord   `json:"services,omitempty"`
 	Workspaces       map[string]WorkspaceRecord `json:"workspaces,omitempty"`
 	Proposals        map[string]Proposal        `json:"proposals,omitempty"`
+	// SandboxTokens holds sha256(supervisor token) per sandbox name.
+	SandboxTokens map[string]SandboxToken `json:"sandbox_tokens,omitempty"`
+	// SSHSessions is keyed by session id; tokens are stored as sha256 only.
+	SSHSessions map[string]SSHSession `json:"ssh_sessions,omitempty"`
 }
 
 // InferenceRoute is the gateway-scoped inference.local backend (OpenShell inference set).
@@ -119,7 +123,11 @@ type Store struct {
 
 // Open loads or initializes state in dataDir.
 func Open(dataDir, gatewayID string) (*Store, error) {
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+	// State carries provider metadata, auth and session hashes: owner-only.
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(dataDir, 0o700); err != nil {
 		return nil, err
 	}
 	s := &Store{
@@ -136,6 +144,9 @@ func Open(dataDir, gatewayID string) (*Store, error) {
 			Services:   map[string]ServiceRecord{},
 			Workspaces: map[string]WorkspaceRecord{},
 			Proposals:  map[string]Proposal{},
+
+			SandboxTokens: map[string]SandboxToken{},
+			SSHSessions:   map[string]SSHSession{},
 		},
 	}
 	b, err := os.ReadFile(s.path)
@@ -167,6 +178,12 @@ func Open(dataDir, gatewayID string) (*Store, error) {
 		if s.state.Proposals == nil {
 			s.state.Proposals = map[string]Proposal{}
 		}
+		if s.state.SandboxTokens == nil {
+			s.state.SandboxTokens = map[string]SandboxToken{}
+		}
+		if s.state.SSHSessions == nil {
+			s.state.SSHSessions = map[string]SSHSession{}
+		}
 		if s.state.GatewayID == "" {
 			s.state.GatewayID = gatewayID
 		}
@@ -183,7 +200,10 @@ func (s *Store) flushLocked() error {
 		return err
 	}
 	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp, 0o600); err != nil {
 		return err
 	}
 	return os.Rename(tmp, s.path)
@@ -226,6 +246,8 @@ func (s *Store) Snapshot() State {
 		inf := *s.state.Inference
 		out.Inference = &inf
 	}
+	out.SandboxTokens = nil
+	out.SSHSessions = nil
 	return out
 }
 
@@ -257,6 +279,12 @@ func (s *Store) DeleteSandbox(name string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.state.Sandboxes, name)
+	delete(s.state.SandboxTokens, name)
+	for id, sess := range s.state.SSHSessions {
+		if sess.Sandbox == name {
+			delete(s.state.SSHSessions, id)
+		}
+	}
 	return s.flushLocked()
 }
 

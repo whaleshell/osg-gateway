@@ -7,6 +7,7 @@ require (
 	github.com/whaleshell/whaleshell-providers v0.1.0-alpha.1
 	github.com/whaleshell/whaleshell-runtime v0.1.0-alpha.1
 	github.com/whaleshell/slogx v0.1.0-alpha.1
+	golang.org/x/crypto v0.56.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 

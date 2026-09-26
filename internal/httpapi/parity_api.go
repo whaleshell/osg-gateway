@@ -160,28 +160,46 @@ func mountParityAPI(mux *http.ServeMux, st *store.Store, oidcValidator *idp.OIDC
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		subject, auth, idpName := identityFromRequest(r, oidcValidator, st.AuthToken())
-		roles := []string{"user"}
-		if auth == "authenticated" {
-			roles = []string{"platform_admin"}
+		p := PrincipalFrom(r.Context())
+		auth := "authenticated"
+		roles := []string{"platform_admin"}
+		switch p.Kind {
+		case PrincipalSandbox:
+			roles = []string{"sandbox_supervisor"}
+		case PrincipalNone:
+			auth, roles = "anonymous", []string{"user"}
+		}
+		if p.IDP == "none" {
+			auth = "unauthenticated_allowed"
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"subject":    subject,
+			"subject":    p.Subject,
 			"auth":       auth,
 			"roles":      roles,
-			"idp":        idpName,
+			"idp":        p.IDP,
+			"sandbox":    p.Sandbox,
 			"gateway_id": st.Snapshot().GatewayID,
 		})
 	})
 
+	// Local-dev token hand-off: loopback peers only, loopback callbacks only.
+	// Remote operators use OIDC or the owner-only <data-dir>/auth_token file.
 	mux.HandleFunc("/v1/auth/login", func(w http.ResponseWriter, r *http.Request) {
+		if !isLoopbackRequest(r) {
+			http.Error(w, "local login is only available from loopback; use OIDC or `whaleshell gateway login --token $(cat <data-dir>/auth_token)`", http.StatusForbidden)
+			return
+		}
+		redirect := r.URL.Query().Get("redirect_uri")
+		if redirect != "" && !isLoopbackRedirect(redirect) {
+			http.Error(w, "redirect_uri must be an http://127.0.0.1:PORT/ callback", http.StatusBadRequest)
+			return
+		}
 		token, err := st.EnsureAuthToken()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		redirect := r.URL.Query().Get("redirect_uri")
 		if redirect != "" {
 			sep := "?"
 			if strings.Contains(redirect, "?") {
